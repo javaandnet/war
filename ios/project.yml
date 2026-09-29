@@ -1,0 +1,68 @@
+# XcodeGen 工程描述（纯文本，可审阅；不要手改生成的 War.xcodeproj）
+# 生成：  brew install xcodegen && cd ios && xcodegen generate
+#
+# 结构约定：
+#   WarKit/  纯逻辑内核（Swift Package，零 UI 依赖）—— 规则、AI、回归测试都在这
+#   War/     iPhone App 外壳（SpriteKit 棋盘 + SwiftUI 面板），只通过公开 API 消费 WarKit
+#   这样 AI 决策逻辑可在 macOS 上 `swift test` 直接验证，不需要起模拟器。
+name: War
+options:
+  bundleIdPrefix: com.war
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  WarKit:
+    path: WarKit
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: K82UDVDKF7
+    # 内核里大量 struct 是值类型 + 少量引用类型，暂不开严格并发（收益小、噪音大）
+    SWIFT_STRICT_CONCURRENCY: minimal
+schemes:
+  # 共享 scheme：本地包依赖必须走 scheme 解析，`-target` 方式不带 SPM
+  War:
+    build:
+      targets:
+        War: running
+    run:
+      config: Debug
+
+targets:
+  War:
+    type: application
+    platform: iOS
+    sources:
+      - War
+    dependencies:
+      - package: WarKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.war.tactics
+        PRODUCT_NAME: War
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # iPhone 独占：iPad 上棋盘缩放与手感都不是这套 UI 的目标
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_FILE: War/Info.plist
+    info:
+      path: War/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: zh-Hans
+        CFBundleDisplayName: 战棋 AI
+        CFBundleIconName: AppIcon
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        # 横屏为主战场（14×14 单格更大），竖屏保留给面板操作
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: true
+        # 回合制游戏无需后台常驻；禁止后台音频，避免被系统持续唤醒（省电）
+        UIBackgroundModes: []

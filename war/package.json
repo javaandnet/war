@@ -1,0 +1,12 @@
+{
+  "name": "war",
+  "version": "0.2.0",
+  "private": true,
+  "description": "回合制战棋 AI 原型（纯前端，零依赖）。AI 内核无 DOM 依赖，可直接移植到 iOS/Swift。",
+  "scripts": {
+    "test": "node tests/kernel.test.mjs",
+    "start": "npx --yes serve -l 5173 .",
+    "check": "for f in config.js item.js field.js ai.js game.js; do node --check $f || exit 1; done && echo '语法检查通过'"
+  },
+  "license": "MIT"
+}

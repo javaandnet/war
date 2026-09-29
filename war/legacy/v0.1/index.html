@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>战争游戏</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .game-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+        
+        .game-header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .game-header h1 {
+            color: #333;
+            margin: 0;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        .game-content {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .battlefield-container {
+            flex: 1;
+            min-width: 400px;
+            overflow: auto;
+            max-height: 80vh;
+        }
+        
+        .battlefield {
+            border: 3px solid #333;
+            background: #8FBC8F;
+            display: inline-block;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        .battlefield-row {
+            display: flex;
+        }
+        
+        .battlefield-cell {
+            width: 30px;
+            height: 30px;
+            border: 1px solid #666;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: relative;
+            font-size: 12px;
+        }
+        
+        .battlefield-cell:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        
+        .battlefield-cell.selected {
+            background: rgba(255, 255, 0, 0.5);
+        }
+        
+        .battlefield-cell.attackable {
+            background: rgba(255, 0, 0, 0.3);
+        }
+        
+        .battlefield-cell.movable {
+            background: rgba(0, 255, 0, 0.3);
+        }
+        
+        .unit {
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+            text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+            font-size: 10px;
+        }
+        
+        .unit.infantry {
+            border-radius: 50%; /* 圆形 */
+        }
+        
+        .unit.cavalry {
+            border-radius: 0; /* 方形 */
+        }
+        
+        .unit.archer {
+            border-radius: 25%; /* 六边形效果 */
+            transform: rotate(45deg);
+        }
+        
+        .unit.archer::before {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background: inherit;
+            border-radius: 25%;
+            transform: rotate(-45deg);
+        }
+        
+        /* 玩家1 - 蓝色系 */
+        .unit.player1.infantry {
+            background: linear-gradient(45deg, #2196F3, #1976D2);
+        }
+        
+        .unit.player1.cavalry {
+            background: linear-gradient(45deg, #03A9F4, #0288D1);
+        }
+        
+        .unit.player1.archer {
+            background: linear-gradient(45deg, #00BCD4, #0097A7);
+        }
+        
+        /* 玩家2 - 红色系 */
+        .unit.player2.infantry {
+            background: linear-gradient(45deg, #F44336, #D32F2F);
+        }
+        
+        .unit.player2.cavalry {
+            background: linear-gradient(45deg, #E91E63, #C2185B);
+        }
+        
+        .unit.player2.archer {
+            background: linear-gradient(45deg, #FF5722, #E64A19);
+        }
+        
+        .unit.player1 {
+            border: 2px solid #0D47A1;
+        }
+        
+        .unit.player2 {
+            border: 2px solid #B71C1C;
+        }
+        
+        .unit.dead {
+            opacity: 0.3;
+            background: #666;
+        }
+        
+        .unit-info {
+            position: absolute;
+            bottom: -1px;
+            right: -1px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            font-size: 8px;
+            padding: 1px 2px;
+            border-radius: 2px;
+        }
+        
+        .control-panel {
+            flex: 0 0 300px;
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+        
+        .control-panel h3 {
+            margin-top: 0;
+            color: #333;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 10px;
+        }
+        
+        .unit-selector {
+            margin-bottom: 20px;
+        }
+        
+        .unit-selector label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        
+        .unit-selector select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        
+        .action-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .btn {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.2s ease;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: linear-gradient(45deg, #45a049, #3d8b40);
+            transform: translateY(-2px);
+        }
+        
+        .btn-secondary {
+            background: linear-gradient(45deg, #2196F3, #1976D2);
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: linear-gradient(45deg, #1976D2, #1565C0);
+            transform: translateY(-2px);
+        }
+        
+        .btn-danger {
+            background: linear-gradient(45deg, #f44336, #d32f2f);
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: linear-gradient(45deg, #d32f2f, #c62828);
+            transform: translateY(-2px);
+        }
+        
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .game-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e8f5e8;
+            border-radius: 5px;
+            border-left: 4px solid #4CAF50;
+        }
+        
+        .game-info h4 {
+            margin: 0 0 10px 0;
+            color: #2e7d32;
+        }
+        
+        .game-info p {
+            margin: 5px 0;
+            color: #555;
+        }
+        
+        .turn-indicator {
+            text-align: center;
+            padding: 10px;
+            background: linear-gradient(45deg, #FFD700, #FFA500);
+            color: white;
+            border-radius: 5px;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }
+        
+        .unit-stats {
+            background: #fff;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+            margin-top: 15px;
+        }
+        
+        .unit-stats h4 {
+            margin: 0 0 10px 0;
+            color: #333;
+        }
+        
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+        }
+        
+        .stat-label {
+            font-weight: bold;
+            color: #666;
+        }
+        
+        .stat-value {
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <div class="game-header">
+            <h1>⚔️ 战争游戏 ⚔️</h1>
+        </div>
+        
+        <div class="turn-indicator" id="turnIndicator">
+            当前回合: 玩家1
+        </div>
+        
+        <div class="turn-info" style="text-align: center; margin-bottom: 20px; padding: 10px; background: #e3f2fd; border-radius: 5px; border: 1px solid #2196F3;">
+            <div style="font-weight: bold; color: #1976D2;">回合信息</div>
+            <div>当前回合数: <span id="turnCount" style="font-weight: bold; color: #d32f2f;">0</span></div>
+            <div>最大回合数: <span style="font-weight: bold; color: #388e3c;">100</span></div>
+        </div>
+        
+        <div class="game-content">
+            <div class="battlefield-container">
+                <h3>战场</h3>
+                <div class="battlefield" id="battlefield">
+                    <!-- 战场将通过JavaScript动态生成 -->
+                </div>
+            </div>
+            
+            <div class="control-panel">
+                <h3>控制面板</h3>
+                
+                <div class="unit-selector">
+                    <label for="unitType">选择兵种:</label>
+                    <select id="unitType">
+                        <option value="infantry">步兵</option>
+                        <option value="cavalry">骑兵</option>
+                        <option value="archer">弓兵</option>
+                    </select>
+                </div>
+                
+                <div class="action-buttons">
+                    <button class="btn btn-primary" id="placeUnit">放置单位</button>
+                    <button class="btn btn-secondary" id="moveUnit">移动</button>
+                    <button class="btn btn-danger" id="attackUnit">攻击</button>
+                    <button class="btn btn-secondary" id="endTurn">结束回合</button>
+                    <button class="btn btn-primary" id="newGame">新游戏</button>
+                </div>
+                
+                <div class="ai-controls" style="margin-top: 20px; padding: 15px; background: #f0f8ff; border-radius: 5px; border: 1px solid #ddd;">
+                    <h4 style="margin: 0 0 10px 0; color: #333;">AI控制</h4>
+                    
+                    <div style="margin-bottom: 10px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: bold;">游戏模式:</label>
+                        <select id="gameMode" style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 3px;">
+                            <option value="manual">手动模式</option>
+                            <option value="ai_vs_player">AI vs 玩家</option>
+                            <option value="auto">自动模式 (AI vs AI)</option>
+                        </select>
+                    </div>
+                    
+                    <div style="margin-bottom: 10px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: bold;">AI难度:</label>
+                        <select id="aiDifficulty" style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 3px;">
+                            <option value="easy">简单</option>
+                            <option value="medium" selected>中等</option>
+                            <option value="hard">困难</option>
+                        </select>
+                    </div>
+                    
+                    <button class="btn btn-secondary" id="executeAI" style="width: 100%; margin-top: 10px;">执行AI回合</button>
+                    <button class="btn btn-primary" id="toggleAuto" style="width: 100%; margin-top: 5px;">开始自动战斗</button>
+                </div>
+                
+                <div class="unit-stats" id="unitStats">
+                    <h4>单位信息</h4>
+                    <div id="statsContent">
+                        选择一个单位查看详细信息
+                    </div>
+                </div>
+                
+                <div class="game-info">
+                    <h4>游戏说明</h4>
+                    <p><strong>兵种特性:</strong></p>
+                    <p>• 步兵: 攻击力中等，防御力高，每次移动1格</p>
+                    <p>• 骑兵: 攻击力高，移动灵活，每次移动1格</p>
+                    <p>• 弓兵: 攻击力中等，攻击范围2格，每次移动1格</p>
+                    <p><strong>移动规则:</strong> 每次只能移动1格，消耗1点行动力</p>
+                    <p><strong>行动力:</strong> 步兵1点，骑兵2点，弓兵1点</p>
+                    <p><strong>行动消耗:</strong> 每次移动或攻击均消耗1点行动力</p>
+                    <p><strong>获胜条件:</strong> 消灭所有敌方单位</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="item.js"></script>
+    <script src="field.js"></script>
+    <script src="ai.js"></script>
+    <script src="game.js"></script>
+</body>
+</html> 

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>战棋 · AI 对战原型</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .game-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .game-header { text-align: center; margin-bottom: 12px; }
+        .game-header h1 { color: #333; margin: 0; font-size: 2.2em; }
+
+        .game-content { display: flex; gap: 20px; flex-wrap: wrap; }
+
+        .battlefield-container { flex: 1; min-width: 400px; overflow: auto; max-height: 82vh; }
+        .battlefield {
+            border: 3px solid #333;
+            background: #8FBC8F;
+            display: inline-block;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        .battlefield-row { display: flex; }
+        .battlefield-cell {
+            width: 32px; height: 32px;
+            border: 1px solid rgba(0,0,0,0.18);
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; position: relative; font-size: 12px;
+            background: #9bcd9b;
+        }
+        .battlefield-cell:hover { outline: 2px solid rgba(255,255,255,0.7); outline-offset: -2px; }
+        .battlefield-cell.selected { background: rgba(255, 235, 0, 0.55); }
+        .battlefield-cell.movable { background: rgba(0, 220, 90, 0.35); }
+        .battlefield-cell.terrain-forest { background: #4f7942; }
+        .battlefield-cell.terrain-hill { background: #a89060; }
+        .battlefield-cell.terrain-water { background: #4a7fb5; }
+        .battlefield-cell.terrain-wall { background: #6b6b6b; }
+
+        .terrain-mark { position: absolute; top: 0; left: 2px; font-size: 9px; color: rgba(255,255,255,0.75); pointer-events: none; }
+        .cost-badge {
+            position: absolute; top: 0; right: 1px;
+            font-size: 8px; color: #063; background: rgba(255,255,255,0.8);
+            border-radius: 3px; padding: 0 2px; pointer-events: none;
+        }
+        .ai-best { position: absolute; bottom: 0; left: 1px; font-size: 10px; color: gold; text-shadow: 0 0 3px #000; pointer-events: none; }
+
+        .unit {
+            width: 24px; height: 24px;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: bold; color: white; text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3); font-size: 11px; position: relative;
+        }
+        .unit.infantry { border-radius: 50%; }
+        .unit.cavalry { border-radius: 0; }
+        .unit.archer { border-radius: 25%; transform: rotate(45deg); }
+        .unit.archer > * { transform: rotate(-45deg); }
+        .unit.targeted { outline: 3px solid #ff2d2d; }
+
+        .unit.player1.infantry { background: linear-gradient(45deg, #2196F3, #1976D2); }
+        .unit.player1.cavalry { background: linear-gradient(45deg, #03A9F4, #0288D1); }
+        .unit.player1.archer { background: linear-gradient(45deg, #00BCD4, #0097A7); }
+        .unit.player2.infantry { background: linear-gradient(45deg, #F44336, #D32F2F); }
+        .unit.player2.cavalry { background: linear-gradient(45deg, #E91E63, #C2185B); }
+        .unit.player2.archer { background: linear-gradient(45deg, #FF5722, #E64A19); }
+        .unit.player1 { border: 2px solid #0D47A1; }
+        .unit.player2 { border: 2px solid #B71C1C; }
+
+        .unit-info {
+            position: absolute; bottom: -1px; right: -1px;
+            background: rgba(0, 0, 0, 0.8); color: white;
+            font-size: 8px; padding: 0 2px; border-radius: 2px; font-weight: normal;
+        }
+        .unit-ap {
+            position: absolute; top: -6px; left: -2px;
+            background: rgba(255,255,255,0.85); color: #222;
+            font-size: 8px; padding: 0 2px; border-radius: 2px; font-weight: normal;
+        }
+
+        .damage-float {
+            position: absolute; left: 8px; top: 4px; color: #ff1744; font-weight: bold;
+            font-size: 15px; z-index: 1000; pointer-events: none;
+            animation: damageFloat 0.9s ease-out forwards; text-shadow: 0 0 3px #fff;
+        }
+        .damage-float.counter { color: #ffab00; }
+        @keyframes damageFloat { 0% { transform: translateY(0); opacity: 1; } 100% { transform: translateY(-26px); opacity: 0; } }
+
+        .control-panel { flex: 0 0 340px; background: #f5f5f5; padding: 18px; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+        .control-panel h3 { margin-top: 0; color: #333; border-bottom: 2px solid #ddd; padding-bottom: 8px; }
+        .panel-block { margin-bottom: 14px; padding: 12px; background: #fff; border-radius: 6px; border: 1px solid #e2e2e2; }
+        .panel-block h4 { margin: 0 0 8px 0; color: #333; font-size: 14px; }
+        .field { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 13px; }
+        .field label { flex: 0 0 68px; font-weight: bold; color: #555; }
+        .field select, .field input[type=number] { flex: 1; padding: 5px; border: 1px solid #ddd; border-radius: 4px; }
+        .field input[type=range] { flex: 1; }
+
+        .action-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+        .btn { padding: 9px 12px; border: none; border-radius: 5px; cursor: pointer; font-size: 13px; font-weight: bold; transition: all 0.15s ease; flex: 1 1 45%; }
+        .btn-primary { background: linear-gradient(45deg, #4CAF50, #45a049); color: white; }
+        .btn-secondary { background: linear-gradient(45deg, #2196F3, #1976D2); color: white; }
+        .btn-danger { background: linear-gradient(45deg, #f44336, #d32f2f); color: white; }
+        .btn:hover:not(:disabled) { transform: translateY(-1px); }
+        .btn:disabled { background: #ccc; cursor: not-allowed; }
+
+        .turn-indicator {
+            text-align: center; padding: 10px;
+            background: linear-gradient(45deg, #FFD700, #FFA500);
+            color: #4a3000; border-radius: 5px; font-weight: bold; margin-bottom: 14px;
+        }
+
+        .legend { font-size: 11px; color: #444; line-height: 1.7; }
+        .legend .lg { display: inline-flex; align-items: center; gap: 3px; margin-right: 10px; }
+        .legend .lg-box { width: 12px; height: 12px; display: inline-block; border: 1px solid #999; background: #9bcd9b; }
+
+        .stat-row { display: flex; justify-content: space-between; margin: 4px 0; font-size: 13px; }
+        .stat-label { font-weight: bold; color: #666; }
+        .stat-value { color: #333; }
+        .muted { color: #888; font-size: 11px; }
+
+        .strategy-line { font-size: 12px; line-height: 1.6; background: #fffbe6; border: 1px dashed #d5a400; padding: 8px; border-radius: 5px; }
+
+        #aiLog { max-height: 320px; overflow: auto; font-size: 11px; }
+        #aiLog .decision { border-bottom: 1px solid #eee; padding: 5px 0; }
+        #aiLog .dh { font-weight: bold; color: #1976d2; }
+        #aiLog ul { margin: 3px 0 0 0; padding-left: 14px; }
+        #aiLog li { list-style: none; margin: 1px 0; }
+        #aiLog li.hit { background: #e8f5e9; font-weight: bold; }
+        #aiLog .sc { color: #d32f2f; font-weight: bold; margin: 0 4px; }
+
+        .rules { font-size: 12px; line-height: 1.7; color: #444; }
+        .rules b { color: #222; }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <div class="game-header">
+            <h1>⚔️ 战棋 · AI 对战原型 ⚔️</h1>
+        </div>
+
+        <div class="turn-indicator" id="turnIndicator">当前回合: 玩家1</div>
+
+        <div class="game-content">
+            <div class="battlefield-container">
+                <h3>战场 <span class="muted">（绿=可达且标出机动消耗，红=AI 上回合最优落点★）</span></h3>
+                <div class="battlefield" id="battlefield"></div>
+                <div class="legend" id="legend"></div>
+            </div>
+
+            <div class="control-panel">
+                <h3>控制面板</h3>
+
+                <div class="panel-block">
+                    <h4>布阵</h4>
+                    <div class="field">
+                        <label for="unitType">兵种</label>
+                        <select id="unitType">
+                            <option value="infantry">步兵</option>
+                            <option value="cavalry">骑兵</option>
+                            <option value="archer">弓兵</option>
+                        </select>
+                    </div>
+                    <div class="action-buttons">
+                        <button class="btn btn-primary" id="placeUnit">放置单位</button>
+                        <button class="btn btn-secondary" id="quickDeploy">一键默认布阵</button>
+                    </div>
+                </div>
+
+                <div class="panel-block">
+                    <h4>行动</h4>
+                    <div class="action-buttons">
+                        <button class="btn btn-secondary" id="moveUnit">移动</button>
+                        <button class="btn btn-danger" id="attackUnit">攻击</button>
+                        <button class="btn btn-secondary" id="waitUnit">待命(结束该单位)</button>
+                        <button class="btn btn-primary" id="endTurn">结束回合</button>
+                        <button class="btn btn-primary" id="newGame">新游戏</button>
+                    </div>
+                </div>
+
+                <div class="panel-block">
+                    <h4>AI 控制</h4>
+                    <div class="field">
+                        <label for="gameMode">模式</label>
+                        <select id="gameMode">
+                            <option value="manual">手动（双人）</option>
+                            <option value="ai_vs_player">AI vs 玩家</option>
+                            <option value="auto">自动（AI vs AI）</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="aiDifficulty">难度</label>
+                        <select id="aiDifficulty">
+                            <option value="easy">简单 · 高随机/短视野</option>
+                            <option value="normal" selected>普通 · 中随机</option>
+                            <option value="hard">困难 · 低随机+1步前瞻</option>
+                            <option value="nightmare">噩梦 · 近乎最优+2步前瞻</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="terrainSeed">地形种子</label>
+                        <input type="number" id="terrainSeed" value="7" min="1" step="1">
+                    </div>
+                    <div class="field">
+                        <label for="aiSeed">决策种子</label>
+                        <input type="number" id="aiSeed" value="20260928" min="1" step="1">
+                    </div>
+                    <div class="field">
+                        <label for="speed">节奏</label>
+                        <input type="range" id="speed" min="0" max="800" step="20" value="260">
+                        <span id="speedLabel" class="muted">260ms</span>
+                    </div>
+                    <div class="action-buttons">
+                        <button class="btn btn-secondary" id="executeAI">执行AI回合</button>
+                        <button class="btn btn-primary" id="toggleAuto">开始自动战斗</button>
+                    </div>
+                </div>
+
+                <div class="panel-block">
+                    <h4>调试可视化</h4>
+                    <div class="field"><label><input type="checkbox" id="ovReach" checked> 可达域</label></div>
+                    <div class="field"><label><input type="checkbox" id="ovThreat"> 威胁热力图</label></div>
+                    <div class="field"><label><input type="checkbox" id="ovCand"> AI 最优落点★</label></div>
+                    <div class="strategy-line" id="strategyLine">（尚未有 AI 回合）</div>
+                </div>
+
+                <div class="panel-block">
+                    <h4>单位信息</h4>
+                    <div id="statsContent">选择一个单位查看详细信息</div>
+                </div>
+
+                <div class="panel-block">
+                    <h4>AI 决策日志（top-5 候选与打分分解）</h4>
+                    <div id="aiLog"><p class="muted">暂无 AI 决策记录</p></div>
+                </div>
+
+                <div class="panel-block rules">
+                    <h4>规则</h4>
+                    <p><b>兵种</b>：步兵 100HP/攻40/防12/机动4；骑兵 90HP/攻50/防10/机动7；弓兵 60HP/攻45/防6/射程2。</p>
+                    <p><b>行动</b>：每回合机动点与攻击次数是两个独立预算。移动按地形消耗机动点（平原1/森林2/山地3），攻击不耗机动。近战兵种被相邻攻击时会反击一次（弓兵不反击）。</p>
+                    <p><b>地形</b>：森林防御+12，山地防御+20；河流与岩壁不可通行。地图左右镜像。</p>
+                    <p><b>射程2 直线射击</b>需要视线，中间站人则打不到。</p>
+                    <p><b>获胜</b>：消灭对方全部单位；100 回合上限按剩余兵力判定。</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="item.js"></script>
+    <script src="field.js"></script>
+    <script src="ai.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
