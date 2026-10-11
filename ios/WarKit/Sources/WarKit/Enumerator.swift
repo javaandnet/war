@@ -62,7 +62,9 @@ public enum Enumerator {
         // 原地放并不损失多少选项。玩家侧 UI 仍可先走再放（内核不禁止）。
         if unit.isChief, unit.remainingSpell > 0, unit.canCast, !unit.stunned {
             for spellKey in WarConfig.spellOrder where unit.charges(for: spellKey) > 0 {
-                guard let stat = WarConfig.spells[spellKey] else { continue }
+                // 射程按首领实际档位算：拿基础表会把“本可以打得到的目标”漏枚举
+                guard let stat = WarConfig.spellStat(spellKey, level: unit.spellLevels[spellKey] ?? 0)
+                else { continue }
                 for target in spellTargets(unit, stat, ctx) {
                     add(.spell, origin, target.id, [origin], spellKey)
                 }
@@ -71,6 +73,13 @@ public enum Enumerator {
 
         add(.wait, origin, nil, [origin])
 
+        // 送死着法在枚举层就否掉：评分扣分只改排序，而低难度档的 softmax 本来就要往
+        // 次优候选洒随机 —— 没有硬门槛时"反击必死又换不掉击杀"的攻击仍会被采样出来。
+        // `.wait` 恒存在所以过滤后不可能为空，但仍留一道"空则回退"的保险：
+        // 万一哪天判定条件收紧到把非攻击候选也吞了，AI 至少还能动，不会原地卡住。
+        let survivable = candidates.filter { !Scorer.isSuicidalAttack(ctx, $0) }
+        if !survivable.isEmpty { candidates = survivable }
+
         // 超预算时优先保留攻击类候选（砍掉纯机动候选不会明显降低棋力）
         if candidates.count > maxCandidatesPerUnit {
             let rank: (CandidateKind) -> Int = { k in
@@ -78,7 +87,7 @@ public enum Enumerator {
                 case .attack, .moveAttack: return 0
                 case .spell: return 1          // 施法不能被机动候选挤掉
                 case .move: return 2
-                case .wait: return 3
+                case .wait, .promote: return 3   // `.promote` 不在枚举产物里（AI 在决策前已转），与 wait 同档兜底
                 }
             }
             candidates = candidates

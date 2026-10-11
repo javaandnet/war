@@ -10,14 +10,20 @@ struct GameSettings: Codable, Equatable {
         case vsAI       // 我方（camp0）手动，敌方 AI
         case manual     // 本地双人，双方手动
         case aiVsAI     // 纯观战，双方 AI 自动
+        case campaign   // 闯关：我方手动 vs AI，关卡参数由公式固定，赢带到下一关、输回滚入关钱包
 
         var label: String {
             switch self {
             case .vsAI: return "对战 AI"
             case .manual: return "本地双人"
             case .aiVsAI: return "AI 自动对战"
+            case .campaign: return "闯关"
             }
         }
+
+        /// 玩家手动指挥 camp0、且军费/施法/自动补敌人都按"玩家 vs AI"运作的模式集合。
+        /// 闯关与对战 AI 在规则层同构，只是关卡参数由公式钉死。
+        var isPlayerVsAI: Bool { self == .vsAI || self == .campaign }
     }
 
     var boardIndex: Int = 1                       // WarConfig.boardSizes 下标

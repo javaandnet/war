@@ -84,10 +84,12 @@ public enum WarConfig {
         public let isChief: Bool
         /// 士兵单价（军费布阵用；首领免费，它是必需单位而非可选兵力）
         public let cost: Int
+        /// 只能由转职得到的分支兵种（不在 `unitTypeOrder` 里，因此军费买不到）
+        public let promotable: Bool
 
         public init(key: String, name: String, symbol: String, hp: Int, atk: Int, def: Int,
                     moveRange: Int, attackRange: Int, counterAttack: Bool, value: Double,
-                    isChief: Bool = false, cost: Int = 0) {
+                    isChief: Bool = false, cost: Int = 0, promotable: Bool = false) {
             self.key = key
             self.name = name
             self.symbol = symbol
@@ -100,6 +102,7 @@ public enum WarConfig {
             self.value = value
             self.isChief = isChief
             self.cost = cost
+            self.promotable = promotable
         }
     }
 
@@ -122,59 +125,133 @@ public enum WarConfig {
         "commander": UnitStat(key: "commander", name: "首领", symbol: "M", hp: 160, atk: 50, def: 16,
                               moveRange: 4, attackRange: 1, counterAttack: true, value: 2.5,
                               isChief: true, cost: 0),
+        // ── 以下 8 个是**转职分支**（`promotable: true`、`cost: 0`）：只能由 10 级转职得到，
+        //    军费买不到（不在 `unitTypeOrder` 里、cost 0 也让 `upgradeCost` 直接拒卖）。
+        //    数值刻意与基础兵种拉开量级：一条重生存、一条重输出/机动。
+        // 近卫：步兵的盾墙（HP/防最高，机动 4）
+        "guard": UnitStat(key: "guard", name: "近卫", symbol: "G", hp: 140, atk: 46, def: 22,
+                          moveRange: 4, attackRange: 1, counterAttack: true, value: 1.55,
+                          cost: 0, promotable: true),
+        // 枪兵：射程 2 的反骑兵阵线
+        "lancer": UnitStat(key: "lancer", name: "枪兵", symbol: "L", hp: 115, atk: 58, def: 15,
+                           moveRange: 4, attackRange: 2, counterAttack: true, value: 1.70,
+                           cost: 0, promotable: true),
+        // 重骑兵：装甲冲击（攻高防高，机动降到 6）
+        "heavy": UnitStat(key: "heavy", name: "重骑兵", symbol: "H", hp: 130, atk: 62, def: 20,
+                          moveRange: 6, attackRange: 1, counterAttack: true, value: 1.75,
+                          cost: 0, promotable: true),
+        // 游骑：全场最高机动 + 射程 2，但不反击
+        "scout": UnitStat(key: "scout", name: "游骑", symbol: "S", hp: 100, atk: 55, def: 12,
+                          moveRange: 8, attackRange: 2, counterAttack: false, value: 1.80,
+                          cost: 0, promotable: true),
+        // 弩兵：射程 3 的定点输出（脆、不反击）
+        "crossbow": UnitStat(key: "crossbow", name: "弩兵", symbol: "X", hp: 70, atk: 62, def: 9,
+                             moveRange: 3, attackRange: 3, counterAttack: false, value: 1.85,
+                             cost: 0, promotable: true),
+        // 游侠：能反击的半肉弓（机动与射程的折中）
+        "ranger": UnitStat(key: "ranger", name: "游侠", symbol: "R", hp: 85, atk: 52, def: 12,
+                           moveRange: 5, attackRange: 2, counterAttack: true, value: 1.75,
+                           cost: 0, promotable: true),
+        // 王者：统帅的防守路（HP/防最高，仍是首领：斩首与施法资格不变）
+        "king": UnitStat(key: "king", name: "王者", symbol: "K", hp: 220, atk: 58, def: 26,
+                         moveRange: 4, attackRange: 1, counterAttack: true, value: 2.9,
+                         isChief: true, cost: 0, promotable: true),
+        // 圣骑士：统帅的进攻路（攻高、机动 +1，仍是首领）
+        "paladin": UnitStat(key: "paladin", name: "圣骑士", symbol: "P", hp: 190, atk: 70, def: 20,
+                            moveRange: 5, attackRange: 1, counterAttack: true, value: 2.9,
+                            isChief: true, cost: 0, promotable: true),
     ]
 
     /// 首领兵种 key（每阵营恰好一名，不占士兵名额）
     public static let chiefTypeKey = "commander"
 
     /**
-     * 兵种档位（“升级兵的质量”）：倍率以纯函数形式施加，
-     * 这样 WarUnit 的 maxHp/atk/def 仍是 `let`，快照与 AI 评分都不必改结构。
+     * 兵种升级：攻 / 防 / 生命三条**彼此独立**的等级线，各自从 T0 = 0（原始数值）起，**不限级别**。
+     * - 攻击线 atk：只涨 atk；
+     * - 防御线 def：只涨 def；
+     * - 生命线 hp：只涨 hp。
+     * - value（战略价值）恒定不随升级变：升级只改战斗数值，AI 的集火/物质分/重心口径保持稳定，
+     *   难度阈值迁移最小。倍率以纯函数施加，所以 WarUnit 的 maxHp/atk/def 仍是 `let`，快照与评分都不改结构。
      */
-    public struct TierStats: Sendable {
-        public let hp: Double
-        public let atk: Double
-        public let def: Double
-        public let value: Double
-        public init(hp: Double, atk: Double, def: Double, value: Double) {
-            self.hp = hp; self.atk = atk; self.def = def; self.value = value
+    public struct Upgrades: Sendable, Equatable, Codable {
+        public var atk: Int   // 攻击线等级（T0=0）
+        public var def: Int   // 防御线等级（T0=0）
+        public var hp: Int    // 生命线等级（T0=0）
+        public init(atk: Int = 0, def: Int = 0, hp: Int = 0) {
+            self.atk = Swift.max(0, atk)
+            self.def = Swift.max(0, def)
+            self.hp = Swift.max(0, hp)
+        }
+
+        public func level(_ track: UpgradeTrack) -> Int {
+            switch track {
+            case .attack: return atk
+            case .defense: return def
+            case .health: return hp
+            }
+        }
+        public mutating func bump(_ track: UpgradeTrack) {
+            switch track {
+            case .attack: atk += 1
+            case .defense: def += 1
+            case .health: hp += 1
+            }
+        }
+        /// 降一档（买错反悔用）。与 `bump` 严格互逆，钳在 T0 不再往下（负等级不参与定价与数值）。
+        public mutating func lower(_ track: UpgradeTrack) {
+            switch track {
+            case .attack: atk = Swift.max(0, atk - 1)
+            case .defense: def = Swift.max(0, def - 1)
+            case .health: hp = Swift.max(0, hp - 1)
+            }
+        }
+        /// 三条线全为 0 = 未升级（可短路回基础数值，避免无谓的四舍五入漂移）
+        public var isBase: Bool { atk == 0 && def == 0 && hp == 0 }
+    }
+
+    /// 升级线（攻 / 防 / 生命，三线各自独立）
+    public enum UpgradeTrack: String, Codable, CaseIterable {
+        case attack, defense, health
+        public var label: String {
+            switch self {
+            case .attack: return "攻击"
+            case .defense: return "防御"
+            case .health: return "生命"
+            }
         }
     }
 
-    public static let maxTier = 3
+    /// 每级增益（线性，相对兵种基础值）：atk +15%、def +10%、hp +12%
+    public static let atkGainPerLevel: Double = 0.15
+    public static let hpGainPerLevel: Double = 0.12
+    public static let defGainPerLevel: Double = 0.10
 
-    /// 升到该档的费用（下标 0 即 tier1 原价，不收费）
-    public static let tierCosts = [0, 80, 140]
-
-    public static let tierStats: [TierStats] = [
-        TierStats(hp: 1.00, atk: 1.00, def: 1.00, value: 1.00),
-        TierStats(hp: 1.15, atk: 1.15, def: 1.10, value: 1.15),
-        TierStats(hp: 1.35, atk: 1.30, def: 1.20, value: 1.35),
-    ]
-
-    public static func tierScale(_ tier: Int) -> TierStats {
-        tierStats[min(max(tier, 1), maxTier) - 1]
+    /// 升某条线「下一档」(currentLv→currentLv+1) 的费用 = 单价 ×(0.6 + 0.4×当前等级)，最低 10，
+    /// 随等级线性递增、无上限。首领不可升级（cost 0）——返回 Int.max 当作"买不起"，调用侧据此拒绝。
+    public static func upgradeCost(typeKey: String, currentLevel: Int) -> Int {
+        guard let s = unitTypes[typeKey], !s.isChief, s.cost > 0 else { return .max }
+        return max(10, Int((Double(s.cost) * (0.6 + 0.4 * Double(max(0, currentLevel)))).rounded()))
     }
 
-    /// 按档位取实际数值（四舍五入，保证同输入同输出 —— 复现不变式依赖这点）
-    public static func unitStat(_ typeKey: String, tier: Int = 1) -> UnitStat? {
+    /// 按三条升级线等级取实际数值（四舍五入，纯函数 —— 复现不变式依赖这点）。value 恒定 = 基础值。
+    public static func unitStat(_ typeKey: String, upgrades: Upgrades = Upgrades()) -> UnitStat? {
         guard let base = unitTypes[typeKey] else { return nil }
-        let s = tierScale(tier)
-        if s.hp == 1 && s.atk == 1 && s.def == 1 && s.value == 1 { return base }
+        if upgrades.isBase { return base }
         return UnitStat(key: base.key, name: base.name, symbol: base.symbol,
-                        hp: Int((Double(base.hp) * s.hp).rounded()),
-                        atk: Int((Double(base.atk) * s.atk).rounded()),
-                        def: Int((Double(base.def) * s.def).rounded()),
+                        hp: Int((Double(base.hp) * (1 + hpGainPerLevel * Double(upgrades.hp))).rounded()),
+                        atk: Int((Double(base.atk) * (1 + atkGainPerLevel * Double(upgrades.atk))).rounded()),
+                        def: Int((Double(base.def) * (1 + defGainPerLevel * Double(upgrades.def))).rounded()),
                         moveRange: base.moveRange, attackRange: base.attackRange,
                         counterAttack: base.counterAttack,
-                        value: base.value * s.value,
-                        isChief: base.isChief, cost: base.cost)
+                        value: base.value,
+                        isChief: base.isChief, cost: base.cost, promotable: base.promotable)
     }
 
     /// 默认布阵（每方 6 个**士兵**，iPhone 小屏节奏更快；首领另算）
     public static let defaultRoster = ["infantry", "infantry", "cavalry", "cavalry", "archer", "archer"]
 
-    /// 兵种展示顺序（布阵选择器用，字典无序）。首领不在其中：它免费且必带。
+    /// 兵种展示顺序（布阵选择器用，字典无序）。首领不在其中：它免费且必带；
+    /// 转职分支也不在其中：它只能由 10 级转职得到，不是货架上的商品。
     public static let unitTypeOrder = ["infantry", "cavalry", "archer"]
 
     // MARK: - 魔法（只有首领能施放）
@@ -232,6 +309,32 @@ public enum WarConfig {
     /// 魔法展示顺序（字典无序，商店页需要稳定次序）
     public static let spellOrder = ["fireball", "heal", "freeze"]
 
+    /// 魔法等级上限（0 = 刚买断的基础档，3 = 顶档）
+    public static let maxSpellLevel = 3
+
+    /// 某门魔法在给定等级下的**实际生效数值**（唯一口径）：
+    /// 威力与溅射 ×(1 + 0.2 × 等级)，顶档（≥3）射程 +1。纯函数、四舍五入，
+    /// 于是内核结算、AI 评分、面板文案拿到的是同一个数 —— UI 不自己乘系数。
+    public static func spellStat(_ key: String, level: Int) -> SpellStat? {
+        guard let base = spells[key] else { return nil }
+        let lv = min(max(0, level), maxSpellLevel)
+        guard lv > 0 else { return base }
+        let scale = 1 + 0.2 * Double(lv)
+        return SpellStat(key: base.key, name: base.name, symbol: base.symbol, effect: base.effect,
+                         range: base.range + (lv >= maxSpellLevel ? 1 : 0),
+                         power: Int((Double(base.power) * scale).rounded()),
+                         splash: Int((Double(base.splash) * scale).rounded()),
+                         splashRadius: base.splashRadius,
+                         unlockCost: base.unlockCost, chargeCost: base.chargeCost)
+    }
+
+    /// 升一档的价 = 买断价 ×（当前等级 + 1）：火球 60/120/180，治疗 45/90/135，冰冻 70/140/210。
+    /// 已满级返回 `.max`（与 `upgradeCost` 拒卖首领同一手法：调用侧据此直接拒绝，不特判级数）。
+    public static func spellUpgradeCost(_ key: String, currentLevel: Int) -> Int {
+        guard let base = spells[key], currentLevel < maxSpellLevel else { return .max }
+        return base.unlockCost * (max(0, currentLevel) + 1)
+    }
+
     /// 首领每回合可施法次数（与普攻互斥：一回合一个动作）
     public static let maxSpellsPerTurn = 1
 
@@ -258,9 +361,13 @@ public enum WarConfig {
         /// 本局军费（只交给 `ArmyComposer` 花）：数值强度走钱，
         /// 不走"偷偷把兵种数值改大"，所以 AI 用的都是与玩家同价同档的兵。
         public let budget: Int
+        /// 敌方首领的魔法等级（与玩家“军费买档”同一条成长轴，不读玩家钱包）：
+        /// 低档只会基础数值，高档才有顶档威力与射程。放在难度里而不是兵种里，
+        /// 于是它是第四个旋钮之外的第五个“可复现的强度来源”。
+        public let spellLevel: Int
 
         public init(key: String, name: String, temperature: Double, lookahead: Int,
-                    vision: Int, noise: Double, budget: Int) {
+                    vision: Int, noise: Double, budget: Int, spellLevel: Int = 0) {
             self.key = key
             self.name = name
             self.temperature = temperature
@@ -268,19 +375,61 @@ public enum WarConfig {
             self.vision = vision
             self.noise = noise
             self.budget = budget
+            self.spellLevel = spellLevel
         }
     }
 
     public static let difficulties: [String: Difficulty] = [
-        "easy": Difficulty(key: "easy", name: "简单", temperature: 0.90, lookahead: 0, vision: 5, noise: 0.15, budget: 40),
-        "normal": Difficulty(key: "normal", name: "普通", temperature: 0.35, lookahead: 0, vision: 9, noise: 0.08, budget: 90),
-        "hard": Difficulty(key: "hard", name: "困难", temperature: 0.10, lookahead: 1, vision: .max, noise: 0.04, budget: 140),
-        "nightmare": Difficulty(key: "nightmare", name: "噩梦", temperature: 0.02, lookahead: 2, vision: .max, noise: 0.0, budget: 200),
+        "easy": Difficulty(key: "easy", name: "简单", temperature: 0.90, lookahead: 0, vision: 5, noise: 0.15, budget: 40, spellLevel: 0),
+        "normal": Difficulty(key: "normal", name: "普通", temperature: 0.35, lookahead: 0, vision: 9, noise: 0.08, budget: 90, spellLevel: 1),
+        "hard": Difficulty(key: "hard", name: "困难", temperature: 0.10, lookahead: 1, vision: .max, noise: 0.04, budget: 140, spellLevel: 2),
+        "nightmare": Difficulty(key: "nightmare", name: "噩梦", temperature: 0.02, lookahead: 2, vision: .max, noise: 0.0, budget: 200, spellLevel: 3),
     ]
     public static let defaultDifficultyKey = "normal"
 
     /// 难度展示顺序（由弱到强，字典无序）
     public static let difficultyOrder = ["easy", "normal", "hard", "nightmare"]
+
+    // MARK: - 闯关（Campaign）关卡公式
+    //
+    // 关卡参数全部由关数 n 的纯函数导出：固定、可复现，且不读玩家钱包/战绩。
+    // 于是同一关永远同一张图、同一支敌军、同一套 AI 旋钮 —— 打不过可原地反复重打，
+    // AI 不会因为玩家刚输过就变简单、也不会因为连胜就变难（那不是闯关，是动态匹配）。
+    public struct LevelSpec: Sendable, Equatable {
+        public let level: Int
+        public let difficultyKey: String
+        public let enemyUpgrades: Upgrades
+        public let terrainSeed: Int
+        public let aiSeed: Int
+        /// 本关敌军首领的魔法等级（与难度档的 `spellLevel` 同一量纲，但走关数公式）
+        public let spellLevel: Int
+
+        public init(level: Int, difficultyKey: String, enemyUpgrades: Upgrades,
+                    terrainSeed: Int, aiSeed: Int, spellLevel: Int = 0) {
+            self.level = level
+            self.difficultyKey = difficultyKey
+            self.enemyUpgrades = enemyUpgrades
+            self.terrainSeed = terrainSeed
+            self.aiSeed = aiSeed
+            self.spellLevel = spellLevel
+        }
+    }
+
+    /// 关数 → 关卡参数。第 1…4 关依次走 简单/普通/困难/噩梦（决定 AI 的视野/温度/前瞻旋钮）；
+    /// 敌军**属性按公式独立成长**：每 2 关三线（攻/防/生命）各 +1（从 T0 起，不限级），与玩家钱包无关。
+    /// 地图 / AI seed 随关数线性变化（各自钉死一张可复现的图与一串采样流）。
+    public static func campaignLevel(_ n: Int) -> LevelSpec {
+        let level = max(1, n)
+        let idx = min(max(0, level - 1), difficultyOrder.count - 1)
+        let key = difficultyOrder[idx]
+        let growth = (level - 1) / 2   // 每 2 关每条线 +1
+        return LevelSpec(level: level, difficultyKey: key,
+                         enemyUpgrades: Upgrades(atk: growth, def: growth, hp: growth),
+                         terrainSeed: 1000 + level * 7, aiSeed: 20260101 + level * 13,
+                         // 魔法档次与三线成长同节奏（每 2 关一档），但不跟难度档回退：
+                         // 第 5 关回到噩梦档之后，顶档魔法仍然在。
+                         spellLevel: min(maxSpellLevel, growth))
+    }
 
     // MARK: - 评分权重（分项均已归一化到 [0,1]，权重即最终贡献上限）
 
@@ -310,13 +459,20 @@ public enum WarConfig {
         public let heal: Double
         /// 冰冻收益（封住一个能行动敌人的回合，按目标价值折算）
         public let freeze: Double
+        /// 自杀门禁：本次行动会让自己死掉且换不掉任何战果（反击必杀 + 打不死目标）
+        public let suicide: Double
+        /// 首领死亡风险：只有“落点下回合会被打死”这一条硬门槛才计，
+        /// 因为首领一死就地判负，代价不是“少一个兵”而是“输掉本局”。
+        /// 士兵没有对应项 —— 通用的“落点死亡风险”实测会把双方顶成绕行不接战，
+        /// 详见 `Scorer` 里那段结论（调参前请先重跑量尺）。
+        public let chiefPeril: Double
 
         public init(damage: Double, kill: Double, overkill: Double, selfPreserve: Double,
                     targetValue: Double, exposure: Double, terrain: Double, focus: Double,
                     counterRisk: Double, mobility: Double, surround: Double, objective: Double,
                     support: Double, waste: Double, rangePenalty: Double,
                     engage: Double, proximity: Double, chiefBounty: Double,
-                    heal: Double, freeze: Double) {
+                    heal: Double, freeze: Double, suicide: Double, chiefPeril: Double) {
             self.damage = damage
             self.kill = kill
             self.overkill = overkill
@@ -337,6 +493,8 @@ public enum WarConfig {
             self.chiefBounty = chiefBounty
             self.heal = heal
             self.freeze = freeze
+            self.suicide = suicide
+            self.chiefPeril = chiefPeril
         }
     }
 
@@ -362,7 +520,12 @@ public enum WarConfig {
         chiefBounty: 35,      // 斩首赏金：能打到敌方首领时的额外加分（≈ 1.6 个 targetValue）
         // 两个魔法项刻意低于 kill: 80 —— 再高就会让 AI 放弃到手的击杀去施法
         heal: 18,             // 治疗：救回的血不值一个击杀，只是顺手补一口
-        freeze: 30            // 冰冻：封掉敌人一回合，比一次中等伤害略值
+        freeze: 30,           // 冰冻：封掉敌人一回合，比一次中等伤害略值
+        // ── 反“自动送死”两项（与 exposure 分层：exposure 只讲“会被打疼”，
+        //    这里只问“会不会因此死”）。伤害类收益最高约 damage 100 + kill 80，
+        //    所以自杀项必须比它们一个量级以上，否则高温度档一定会采样出必死着法。
+        suicide: -320,        // 反击必杀自己且打不死目标：直接否掉（另在枚举层硬过滤）
+        chiefPeril: -240      // 首领落点下回合会被打死（=本局判负）
     )
 
     /// 归一化标尺：把不同量纲的分项统一到 [0,1]

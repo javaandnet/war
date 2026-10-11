@@ -100,6 +100,12 @@ public final class Lookahead {
                     guard let cell = reach[p] else { continue }
                     for target in enemies where bf.canAttackFrom(unit, from: p, to: target) {
                         let dmg = unit.damageTo(target, targetTerrainDefBonus: bf.getTerrainDefBonus(target.position))
+                        // rollout 同样不派送死手：否则前瞻会把“必死换残子”的分支当成好棋，
+                        // 反过来替真实候选里的自杀着法背书（与 `Enumerator` 的硬过滤同一口径）。
+                        if dmg < target.hp, target.canCounterAttackerAt(p),
+                           target.damageTo(unit, targetTerrainDefBonus: bf.getTerrainDefBonus(p)) >= unit.hp {
+                            continue
+                        }
                         let gain = dmg >= target.hp ? Double.infinity
                             : Double(dmg) - (target.canCounterAttackerAt(p)
                                 ? Double(target.damageTo(unit, targetTerrainDefBonus: bf.getTerrainDefBonus(p))) * 0.6

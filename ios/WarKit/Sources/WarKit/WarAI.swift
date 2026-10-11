@@ -73,6 +73,21 @@ public final class WarAI {
 
         for unit in bf.unitsOfCamp(camp).sorted(by: { $0.id < $1.id }) {
             if unit.isDead { continue }
+
+            // 0) 转职：等级到点就先转（它在决策前完成，于是本回合的评分用的已是新形态）。
+            //    分支由难度定（低两档取表里第一个，高两档走偏好表）—— 纯函数、可重放。
+            //    产一条 `.promote` 事件：不带动画，但必须进事件流，否则回滚后重放不回来。
+            if unit.canPromote,
+               let branch = WarConfig.Growth.aiBranch(for: unit.type, difficultyKey: difficulty.key),
+               bf.promote(unit, to: branch) {
+                events.append(AiEvent(kind: .promote, unitId: unit.id, from: unit.position,
+                                      to: unit.position, path: [unit.position], targetId: nil,
+                                      damage: 0, counterDamage: 0, killed: false, counterKilled: false,
+                                      spent: 0, score: 0,
+                                      desc: "\(WarConfig.unitTypes[unit.type]?.name ?? unit.type) 转职 → \(unit.name)",
+                                      branchKey: branch))
+            }
+
             let ranked = decideCandidates(ctx, unit)
             // 先过滤掉“目标已被友军击杀”的失效候选，再做 softmax 采样
             let valid = ranked.filter { c in
@@ -208,6 +223,10 @@ public enum Replay {
                 return false
             }
             return bf.castSpell(unit, spell: key, at: target.position).success
+        case .promote:
+            // 转职不读战场坐标，只读分支 key：重放调的就是 AI 当时调的那个方法。
+            guard let branch = event.branchKey else { return false }
+            return bf.promote(unit, to: branch)
         }
     }
 }

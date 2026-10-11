@@ -39,6 +39,7 @@ enum Theme {
         "mobility": "机动使用", "objective": "战略牵引", "support": "友军支援",
         "waste": "浪费行动", "engage": "接敌推进", "proximity": "接近度",
         "chiefBounty": "斩首赏金", "heal": "治疗量", "freeze": "冻结价值",
+        "suicide": "送死", "chiefPeril": "首领涉险",
     ]
 
     static let strategyNames: [String: String] = [
@@ -60,6 +61,16 @@ enum Theme {
         "cavalry": "hare.fill",          // 7 格高机动、冲锋
         "archer": "scope",               // 2 格远程、不反击
         "commander": "crown.fill",       // 首领：全军唯一能施法者，死了就输
+        // 以下八个只能由转职得到（`WarConfig.promotions`），不在兵器谱里；
+        // 但格子上的图标契约仍按 `unitTypes` 全量比对，所以一个都不能漏。
+        "guard": "shield.fill",              // 近卫：盾墙，血最厚
+        "lancer": "flag.fill",               // 枪兵：射程 2 的长矛
+        "heavy": "shield.lefthalf.filled",   // 重骑兵：装甲冲锋
+        "scout": "binoculars.fill",          // 游骑：8 格机动 + 射程 2
+        "crossbow": "bolt.fill",             // 弩兵：射程 3，不反击
+        "ranger": "tortoise.fill",           // 游侠：能反击的半肉弓
+        "king": "seal.fill",               // 王者：防守型统帅（玉玺）
+        "paladin": "cross.circle.fill",      // 圣骑士：进攻型统帅
     ]
 
     /// 地形 key → SF Symbol（平原不画图标，保持素面底纹）

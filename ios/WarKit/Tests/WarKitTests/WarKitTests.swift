@@ -90,6 +90,24 @@ final class WarKitTests: XCTestCase {
         XCTAssertEqual(t.hp, hpAfterFirst)
     }
 
+    func testActingEndsMovementBudget() {
+        // 出手即结束本回合行动：“先走位、后出手”是唯一顺序，反过来不行。
+        let a = unit(1, "infantry", 0, 3, 3)
+        let t = unit(2, "infantry", 1, 4, 3)
+        let bf = field(8, 8, [], [a, t])
+        _ = bf.attack(a, t)
+        XCTAssertEqual(a.remainingMove, 0, "[P0] 攻击后不得再移动")
+        XCTAssertEqual(Set(bf.computeReachable(a).keys), [a.position], "可达域应收拾到只剩自身格")
+
+        // 施法同口径（否则“走 → 放”与“放 → 走”会变成两套时序）
+        let chief = self.chief(3, camp: 0, 0, 3, spells: ["fireball"])
+        let foe = unit(4, "infantry", 1, 1, 3)
+        let bf2 = field(8, 8, [], [chief, foe])
+        bf2.beginTurn(camp: 0)
+        XCTAssertTrue(bf2.castSpell(chief, spell: "fireball", at: foe.position).success)
+        XCTAssertEqual(chief.remainingMove, 0, "[P0] 施法后不得再移动")
+    }
+
     func testDamageIsAttritionAndTerrainMatters() {
         let a = unit(1, "infantry", 0, 0, 0)
         let t1 = unit(2, "infantry", 1, 1, 0)
@@ -214,6 +232,23 @@ final class WarKitTests: XCTestCase {
         let ctx = context(bf, camp: 0, difficulty: "nightmare")
         let ranked = WarAI(bf: bf).decideCandidates(ctx, me)
         XCTAssertEqual(ranked.first?.targetId, softKill.id, "能杀则优先杀（击杀收益最大）")
+    }
+
+    func testAiRejectsSuicidalAttack() {
+        // 残血步兵（hp20）去撞满血守兵：我打它 28 打不死，它反手 28 直接把我打死。
+        // 旁边给一个可无反击的残血弓兵作为“正常选项”，验证硬过滤不是一刀切掉攻击。
+        let me = unit(1, "infantry", 0, 5, 5, hp: 20)
+        let tough = unit(2, "infantry", 1, 5, 4)                 // 可反击且能反杀
+        let soft = unit(3, "archer", 1, 6, 5, hp: 5)             // 一发带走且不反击
+        let bf = field(12, 12, [], [me, tough, soft])
+        let ctx = context(bf, camp: 0, difficulty: "nightmare")
+        let ranked = WarAI(bf: bf).decideCandidates(ctx, me)
+
+        XCTAssertFalse(ranked.isEmpty, "候选不得被过滤空")
+        XCTAssertFalse(ranked.contains { Scorer.isSuicidalAttack(ctx, $0) },
+                       "[P1] 必死又换不掉击杀的候选不得出现在候选集里")
+        XCTAssertNotEqual(ranked.first?.targetId, tough.id, "AI 不应拿残血兵去撞能反杀自己的守兵")
+        XCTAssertEqual(ranked.first?.targetId, soft.id, "无反击的击杀仍应排第一（过滤没误伤好棋）")
     }
 
     func testArcherDoesNotChargeIntoMelee() {
@@ -366,19 +401,31 @@ final class WarKitTests: XCTestCase {
 
     /// 难度档位必须构成可测量的强弱阶梯。
     ///
-    /// 阈值来自实测（release，`WAR_MEASURE_SEEDS=200` 大样本定强弱、
-    /// 40 样本定回归值）。军费成为第四个旋钮后， duel 两侧各自拿预算配兵，
-    /// 于是量尺测的是“智能 + 经济”合起来的真实难度：
-    /// nightmare vs easy = 200/200、hard vs easy = 200/200、
-    /// hard vs normal = 176/200（88%）、nightmare vs hard = 165/200（82.5%）。
-    /// 注：跨度最大的两对已饱和到 100%，它们只能报“不能输”；
-    /// 真正有分辨力的是相邻两对（噪声底 nightmare 自对弈 = 95/105），
-    /// 所以相邻档阈值按 40 样本的均值 −2σ 定，既卡住倒挂又不误报。
+    /// 阈值来自实测（release，`tools/Meter` 大样本定强弱、按样本量折算 −2σ 定回归值）。军费成为第
+    /// 四个旋钮后， duel 两侧各自拿预算配兵，于是量尺测的是“智能 + 经济”合起来的真实难度。
+    /// 反“自动送死”门禁（`weights.suicide` + 枚举层硬过滤）落地后送死（被反击致死且未击杀目标）
+    /// 从 0.45~0.60 次/局降到 0.00 次/局，这一条在战场成长上线后仍然成立（200 样本 0.00/game）。
+    ///
+    /// **成长体系上线后重测 200 样本（release）**：nightmare vs easy = 100%、hard vs easy = 98.8%、
+    /// hard vs normal = 64%、nightmare vs hard = 84% —— 阶梯仍单调，不需要回头调自杀权重。
+    /// 但相邻档确实比旧值又收窄了一截（hard vs normal 74% → 64%）：双方现在都会靠打经验升级、
+    /// 到 10 级转职，弱者因此被系统托了一把，强弱差被成长压薄是这套体系的预期副作用而非 bug。
+    ///
+    /// 相邻两对为什么把样本量提到 80：真正的分界是 50%，而 seed 窗口本身带偏差 ——
+    /// **同档自对弈**在 1...40 上只有 40%、1...80 上 46.2%、1...120 上才是 50%。
+    /// 也就是说 40 个 seed 的窗口对右边（后手方）白送约 7pp，hard vs normal 在这个窗口上实测
+    /// 只有 52.5%（21/40），拿旧阈值 24 去卡它，报的是窗口噪声而不是档位倒挂。
+    /// 窗口拉宽后噪声底（σ）按 √n 收缩，阈值取 release 均值 − 2σ：
+    /// hard vs normal 51.2 − 8.6 → 42；nightmare vs hard 67.2 − 6.6 → 60。
+    /// 注：跨度最大的两对已饱和到 98~100%，它们只能报“不能输”，所以仍按 40 样本卡。
     func testDifficultyOrderingWins() {
         XCTAssertGreaterThanOrEqual(wins("nightmare", "easy"), 36, "噩梦须碾压简单（智能 + 军费双重差距）")
         XCTAssertGreaterThanOrEqual(wins("hard", "easy"), 34, "困难须碾压简单")
-        XCTAssertGreaterThanOrEqual(wins("hard", "normal"), 30, "困难不得弱于普通（档位倒挂）")
-        XCTAssertGreaterThanOrEqual(wins("nightmare", "hard"), 27, "噩梦不得弱于困难（档位倒挂）")
+        let adjacent = Array(1...80)
+        XCTAssertGreaterThanOrEqual(wins("hard", "normal", seeds: adjacent), 42,
+                                    "困难不得弱于普通（档位倒挂）")
+        XCTAssertGreaterThanOrEqual(wins("nightmare", "hard", seeds: adjacent), 60,
+                                    "噩梦不得弱于困难（档位倒挂）")
     }
 
     func testMatchConverges() {
@@ -473,12 +520,13 @@ final class WarKitTests: XCTestCase {
     /// 带充能的首领夹具。充能只能在布阵时写入（`carrySpells`），
     /// 所以这里不直接改字段 —— 走的正是 App/AI 将来用的那一条入口。
     /// `charges` 是**每种**魔法的发数（三种充能价不同，分开计）。
+    /// `levels` 是每种魔法的档位（军费买档 / 难度档的结果），缺省即基础档 0。
     func chief(_ id: Int, camp: Int, _ x: Int, _ y: Int,
-               spells: [String], charges: Int = 3) -> WarUnit {
+               spells: [String], charges: Int = 3, levels: [String: Int] = [:]) -> WarUnit {
         let u = unit(id, WarConfig.chiefTypeKey, camp, x, y)
         var carried: [String: Int] = [:]
         for key in spells where WarConfig.spells[key] != nil { carried[key] = charges }
-        u.carrySpells(carried)
+        u.carrySpells(carried, levels: levels)
         return u
     }
 
@@ -510,6 +558,62 @@ final class WarKitTests: XCTestCase {
         XCTAssertEqual(chief.remainingSpell, 0)
         XCTAssertEqual(chief.remainingAttacks, 0, "[P0] 施法与普攻互斥：一回合一个动作")
         XCTAssertEqual(foe.hp, 100 - WarConfig.spells["fireball"]!.power, "中心格吃满固定伤害")
+    }
+
+    func testSpellLevelScalesPowerSplashAndRange() {
+        let base = WarConfig.spells["fireball"]!
+        // 公式只有一份（`spellStat`）：没升过档就该原样返回，越界档位被钳到顶档
+        XCTAssertEqual(WarConfig.spellStat("fireball", level: 0)?.power, base.power)
+        XCTAssertEqual(WarConfig.spellStat("fireball", level: -5)?.range, base.range)
+        XCTAssertEqual(WarConfig.spellStat("fireball", level: 1)?.power,
+                       Int((Double(base.power) * 1.2).rounded()), "每档 +20%")
+        XCTAssertEqual(WarConfig.spellStat("fireball", level: 1)?.splash,
+                       Int((Double(base.splash) * 1.2).rounded()))
+        XCTAssertEqual(WarConfig.spellStat("fireball", level: 99)?.range,
+                       WarConfig.spellStat("fireball", level: WarConfig.maxSpellLevel)?.range,
+                       "顶档射程 +1，且不因越界档位继续长大")
+        XCTAssertEqual(WarConfig.spellUpgradeCost("fireball", currentLevel: 0), base.unlockCost)
+        XCTAssertEqual(WarConfig.spellUpgradeCost("fireball", currentLevel: WarConfig.maxSpellLevel), .max,
+                       "顶档不卖（调用侧据此直接拒绝，不特判级数）")
+
+        // 基础档打不到的格（距离 4 > 射程 3），顶档（射程 4）能打到，且伤害按档位结算
+        let far = GridPoint(x: 4, y: 0)
+        let plain = chief(1, camp: 0, 0, 0, spells: ["fireball"])
+        let p0 = unit(2, "infantry", 1, 4, 0)
+        let bf0 = field(9, 9, [], [plain, p0])
+        bf0.beginTurn(camp: 0)
+        XCTAssertFalse(bf0.castSpell(plain, spell: "fireball", at: far).success, "基础档射程外应被拒")
+        XCTAssertEqual(plain.charges(for: "fireball"), 3, "被拒的施法不扣充能")
+
+        let top = chief(3, camp: 0, 0, 0, spells: ["fireball"], levels: ["fireball": WarConfig.maxSpellLevel])
+        let p1 = unit(4, "infantry", 1, 4, 0)
+        let bf1 = field(9, 9, [], [top, p1])
+        bf1.beginTurn(camp: 0)
+        let r = bf1.castSpell(top, spell: "fireball", at: far)
+        XCTAssertTrue(r.success, r.message)
+        XCTAssertEqual(p1.hp, p1.maxHp - (WarConfig.spellStat("fireball", level: WarConfig.maxSpellLevel)?.power ?? 0),
+                       "[P0] 结算按施法者自持的档位（否则面板写 96、棋盘上烧 60）")
+    }
+
+    func testEnemyChiefCarriesDifficultySpellLevel() {
+        // AI 不读玩家钱包：档位从难度档/关卡公式导出，经 ArmyPlan 写进敌方首领
+        let plan = ArmyComposer.compose(difficultyKey: "nightmare")!
+        XCTAssertFalse(plan.spellCharges.isEmpty, "噩梦档首领应带着充能上场")
+        for (key, level) in plan.spellLevels {
+            XCTAssertEqual(level, WarConfig.difficulties["nightmare"]?.spellLevel,
+                           "携带的档位应统一取自难度旋钮")
+            XCTAssertGreaterThan(plan.spellCharges[key] ?? 0, 0, "不该给没带发数的魔法记档")
+        }
+        let bf = field(14, 14)
+        XCTAssertTrue(bf.placeArmy(plan, camp: 1))
+        let aiChief = bf.chief(of: 1)
+        XCTAssertEqual(aiChief?.spellLevels, plan.spellLevels, "[P0] 首领档位只能由布阵入口写入")
+
+        // 简单档不练魔法；关数每 2 关一档且不超顶档
+        XCTAssertEqual(ArmyComposer.compose(difficultyKey: "easy")?.spellLevels.isEmpty, true)
+        XCTAssertEqual(WarConfig.campaignLevel(1).spellLevel, 0)
+        XCTAssertEqual(WarConfig.campaignLevel(7).spellLevel, WarConfig.maxSpellLevel,
+                       "顶档之后不随关数继续长大")
     }
 
     func testFireballIgnoresDefenseTerrainAndOnlyBurnsEnemies() {
@@ -659,6 +763,259 @@ final class WarKitTests: XCTestCase {
                              "首领每人带着 9 发三种魔法却一次没放，说明候选/评分链路断了")
     }
 
+    // MARK: - 战场成长（经验 → 等级 → 属性点 → 10 级分支转职）
+
+    /// 已累计的经验（把等级换回经验点数）：断言不必关心在哪一级跨过线
+    func totalExp(_ u: WarUnit) -> Int {
+        (1..<u.level).map(WarConfig.Growth.expToNext).reduce(0, +) + u.expIntoLevel
+    }
+
+    /// 升级曲线与发点节奏（1→10 共 360 点，每级 1 点）
+    func testExpCurveGrantsLevelsAndPoints() {
+        XCTAssertEqual((1..<WarConfig.Growth.baseLevelCap).map(WarConfig.Growth.expToNext).reduce(0, +),
+                       360, "转职门槛的总需求必须能一眼算清")
+        let a = unit(1, "infantry", 0, 0, 0)
+        a.addExp(19)
+        XCTAssertEqual(a.level, 1, "差 1 点不该提前升级")
+        XCTAssertEqual([a.expIntoLevel, a.attrBank], [19, 0])
+        a.addExp(1)
+        XCTAssertEqual([a.level, a.expIntoLevel, a.attrBank], [2, 0, 1], "升级即发 1 点（玩家侧留着由 UI 分）")
+        a.addExp(360)
+        XCTAssertEqual([a.level, a.attrBank], [10, 9], "溢出经验按曲线连续升级")
+        XCTAssertEqual(a.expIntoLevel, 0, "封顶后不再积累（留着也换不到东西）")
+        a.addExp(-5)
+        XCTAssertEqual([a.level, a.attrBank], [10, 9], "负数经验不得把等级倒退")
+    }
+
+    /// 经验只在战斗结算里发（五个来源都是确定量），所以同 seed 的两局必然一致
+    func testCombatAwardsDeterministicExp() {
+        // 出手 + 击杀（击杀赏金按目标战略价值折算：斩首比打折兵长经验）
+        let a = unit(1, "infantry", 0, 0, 0)
+        let t = unit(2, "infantry", 1, 1, 0, hp: 20)
+        let targetValue = t.value
+        let bf = field(6, 6, [], [a, t])
+        let r = bf.attack(a, t)
+        XCTAssertTrue(r.targetKilled)
+        XCTAssertEqual(totalExp(a), WarConfig.Growth.hitExp(r.damage) + WarConfig.Growth.killExp(value: targetValue),
+                       "[P0] 击杀经验 = 出手伤害 + 目标价值折算，两者都取**实际生效量**")
+
+        // 挨打未死也算（远程无反击，才能单独测这一个来源）
+        let shooter = unit(3, "archer", 0, 0, 0)
+        let victim = unit(4, "infantry", 1, 2, 0)
+        let bf2 = field(6, 6, [], [shooter, victim])
+        let r2 = bf2.attack(shooter, victim)
+        XCTAssertEqual(r2.counterDamage, 0, "夹具需无反击：否则两个来源混在一起")
+        XCTAssertEqual(totalExp(shooter), WarConfig.Growth.hitExp(r2.damage), "只拿出手经验")
+        XCTAssertEqual(totalExp(victim), WarConfig.Growth.sufferedExp(r2.damage), "挨一刀也长见识")
+
+        // 治疗按**实际**回复量折半（飘字与经验必须是同一个数）
+        let chief = self.chief(5, camp: 0, 0, 0, spells: ["heal"])
+        let wounded = unit(6, "infantry", 0, 1, 0)
+        let bf3 = field(6, 6, [], [chief, wounded])
+        bf3.beginTurn(camp: 0)
+        wounded.hp = 40
+        let cast = bf3.castSpell(chief, spell: "heal", at: wounded.position)
+        XCTAssertTrue(cast.success)
+        XCTAssertEqual(totalExp(chief), WarConfig.Growth.healExp(cast.affected[wounded.position] ?? 0),
+                       "治疗经验取实际回复量（溢出部分作废）")
+        XCTAssertEqual(WarConfig.Growth.hitExp(999), 40, "出手伤害封顶 40：一发溦射不该把首领直接抬到满级")
+    }
+
+    /// 未转职 = 10 级封顶：升级、经验、加点三条口必须同时收手
+    func testLevelCapUntilPromoted() {
+        let a = unit(1, "infantry", 0, 0, 0)
+        let bf = field(6, 6, [], [a])
+        a.addExp(400)
+        XCTAssertEqual([a.level, a.levelCap], [WarConfig.Growth.baseLevelCap, WarConfig.Growth.baseLevelCap])
+        a.addExp(500)
+        XCTAssertEqual([a.level, a.expIntoLevel], [10, 0], "封顶后经验直接作废，不留“转职就连升三级”的暗账")
+        XCTAssertFalse(bf.allocate(a, track: .attack), "[P0] 满级未转职不得继续加点（先转职才花得出去）")
+        XCTAssertTrue(bf.promote(a, to: "guard"))
+        XCTAssertEqual(a.levelCap, WarConfig.Growth.promotedLevelCap, "转职把上限抬到 20")
+        XCTAssertTrue(bf.allocate(a, track: .attack), "上限抬了，点数才重新花得出去")
+        a.addExp(900)
+        XCTAssertEqual(a.level, WarConfig.Growth.promotedLevelCap, "转职后能继续练到 20 级封顶")
+    }
+
+    /// 属性点只有一个写入点，而且每线加多少与兵种无关
+    func testAttributePointsOnlyThroughKernel() {
+        let a = unit(1, "infantry", 0, 0, 0)
+        let bf = field(6, 6, [], [a])
+        let (hp0, atk0, def0) = (a.maxHp, a.atk, a.def)
+        XCTAssertFalse(bf.allocate(a, track: .attack), "1 级没有点数，按钮不该生效")
+        a.addExp(WarConfig.Growth.expToNext(1))
+        XCTAssertTrue(bf.allocate(a, track: .attack))
+        XCTAssertEqual(a.atk, atk0 + WarConfig.Growth.perPointAtk)
+        XCTAssertEqual([a.maxHp, a.def], [hp0, def0], "加攻不得顺手动到别的线")
+        XCTAssertEqual(a.attrBank, 0)
+        XCTAssertFalse(bf.allocate(a, track: .attack), "[P0] 点数花完不得再白加")
+        a.addExp(WarConfig.Growth.expToNext(2))
+        XCTAssertTrue(bf.allocate(a, track: .health))
+        XCTAssertEqual(a.maxHp, hp0 + WarConfig.Growth.perPointHp, "加生命抬上限，而且当场补进当前血量")
+        XCTAssertEqual(a.hp, a.maxHp, "升级/加点不得让满血子变残")
+    }
+
+    /// 转职：只有满 10 级的**该兵种**能走自己的两条路，且不可逆、不吃钱、保留首领语义
+    func testPromotionRulesAndBranchStats() {
+        let a = unit(1, "infantry", 0, 0, 0)
+        let bf = field(8, 8, [], [a])
+        XCTAssertFalse(bf.promote(a, to: "guard"), "未满 10 级不得转职")
+        a.addExp(360)
+        // 分支必须属于该兵种：步兵想转“王者”就是绕过斩首与施法资格
+        XCTAssertFalse(bf.promote(a, to: "king"), "[P0] 士兵不能转成首领分支")
+        XCTAssertFalse(bf.promote(a, to: "infantry"), "不能原地转自己")
+        let hpBefore = a.hp
+        XCTAssertTrue(bf.promote(a, to: "lancer"))
+        XCTAssertEqual(a.typeKey, "lancer")
+        XCTAssertEqual(a.name, "枪兵", "名字跟随当前形态")
+        XCTAssertEqual(a.attackRange, 2, "枪兵拿到射程 2")
+        XCTAssertEqual(a.type, "infantry", "基础兵种不改写：价目与升级账仍认它")
+        XCTAssertFalse(bf.promote(a, to: "guard"), "只能转一次（换路 = 反悔）")
+        XCTAssertGreaterThanOrEqual(a.hp, hpBefore, "上限抬高必须把差额补进当前血量")
+        XCTAssertEqual(a.attrBank, WarConfig.Growth.grantedPoints(level: 10, promoted: true),
+                       "转职再发 1 点，且应得总数 = 等级-1 + 转职那一点")
+
+        let chief = self.chief(2, camp: 0, 3, 3, spells: ["heal"])
+        let bf2 = field(8, 8, [], [chief])
+        chief.addExp(360)
+        XCTAssertTrue(bf2.promote(chief, to: "paladin"))
+        XCTAssertTrue(chief.isChief, "[P0] 圣骑士仍是首领：斩首判据与施法资格不因转职漂移")
+        XCTAssertEqual(chief.charges(for: "heal"), 3, "转职不吃魔法携带")
+        bf2.beginTurn(camp: 0)
+        chief.hp = 100                       // 转职把上限抬到了 190，先人为造成残血才能测治疗
+        XCTAssertTrue(bf2.castSpell(chief, spell: "heal", at: chief.position).success, "转职后仍能施法")
+    }
+
+    /// 转职改了机动力上限时，剩余点数按差额补偿（不白送、也不偷走）
+    func testPromotionCompensatesMovementBudget() {
+        let fresh = unit(1, "cavalry", 0, 0, 0)          // mv7
+        let bf = field(9, 9, [], [fresh])
+        fresh.addExp(360)
+        XCTAssertTrue(bf.promote(fresh, to: "scout"))     // mv8：本来就没走过 → 拿满新机动
+        XCTAssertEqual([fresh.remainingMove, fresh.moveRange], [8, 8])
+
+        let rider = unit(2, "cavalry", 0, 4, 0)
+        let bf2 = field(9, 9, [], [rider])
+        rider.addExp(360)
+        rider.remainingMove = 2                            // 已经走了 5 格
+        XCTAssertTrue(bf2.promote(rider, to: "heavy"))     // mv6：扣掉差额，不倒贴
+        XCTAssertEqual(rider.remainingMove, 1, "转成更慢的形态要如实扣点（不能靠转职多走一步）")
+    }
+
+    /// AI / 观战侧不留点数：升级与转职那瞬间按兵种偏好循环分掉（纯函数、无随机）
+    func testAutoGrowUnitsDistributePointsByPreference() {
+        let a = WarUnit(id: 1, type: "infantry", camp: 1, x: 0, y: 0, autoGrows: true)
+        let (hp0, atk0, def0) = (a.maxHp, a.atk, a.def)
+        a.addExp(WarConfig.Growth.expToNext(1))
+        XCTAssertEqual(a.attrBank, 0, "AI 手里不留待分点数（否则它永远不成长）")
+        XCTAssertEqual(a.maxHp, hp0 + WarConfig.Growth.perPointHp, "前排循环从生命起步")
+        a.addExp(WarConfig.Growth.expToNext(2))
+        XCTAssertEqual(a.def, def0 + WarConfig.Growth.perPointDef, "第二点补防御")
+        a.addExp(WarConfig.Growth.expToNext(3))
+        XCTAssertEqual(a.atk, atk0 + WarConfig.Growth.perPointAtk, "第三点才轮到攻击")
+
+        let shooter = WarUnit(id: 2, type: "archer", camp: 0, x: 1, y: 1, autoGrows: true)
+        let atk1 = shooter.atk
+        shooter.addExp(WarConfig.Growth.expToNext(1))
+        XCTAssertEqual(shooter.atk, atk1 + WarConfig.Growth.perPointAtk, "输出兵种相反：先补攻击")
+
+        // 成长字段全在快照里（AI 前瞻与回合重放靠它回滚）
+        let snap = a.toState()
+        a.addExp(WarConfig.Growth.expToNext(4))
+        XCTAssertTrue(a.attrAlloc.hp > snap.attrAlloc.hp, "自动分点也要能被快照带走")
+        a.restoreState(snap)
+        XCTAssertEqual(a.toState(), snap, "[P0] 成长回滚必须逐字段一致")
+    }
+
+    /// 成长存盘快照：非法分支与超额点数不能把旧存档洗成一支怪军队
+    func testGrowthSnapshotIsClampedOnLoad() {
+        var dirty = WarConfig.Growth.UnitGrowth(level: 30, expIntoLevel: 99,
+                                                alloc: WarConfig.Upgrades(atk: 9, def: 9, hp: 9),
+                                                branch: "king")
+        // 步兵带首领分支 + 超过应得的点数 + 超上限的等级 → 全部逐项钳回合法
+        let u = WarUnit(id: 1, type: "infantry", camp: 0, x: 0, y: 0, growth: dirty)
+        XCTAssertEqual(u.level, 10, "非法分支按未转职处理 → 等级跟着钳回 10")
+        XCTAssertEqual(u.typeKey, "infantry", "非法分支不能把一个步兵变成王者")
+        XCTAssertEqual(u.attrBank, 0, "等级钳住后多余点数一并削掉（不得白送）")
+        XCTAssertEqual(u.attrAlloc.atk + u.attrAlloc.def + u.attrAlloc.hp, 9, "已分点数不得多于应得")
+        XCTAssertTrue(WarConfig.Growth.grantedPoints(level: u.level, promoted: u.isPromoted)
+                      >= u.attrAlloc.atk + u.attrAlloc.def + u.attrAlloc.hp)
+        dirty = WarConfig.Growth.UnitGrowth(level: 10, branch: "lancer")
+        let ok = WarUnit(id: 2, type: "infantry", camp: 0, x: 1, y: 0, growth: dirty)
+        XCTAssertEqual(ok.level, 10, "合法分支则照单全收")
+        XCTAssertEqual(ok.typeKey, "lancer")
+    }
+
+    /// AI 回合内的转职必须可重放、可复现（事件带 branchKey，推演与重放同一个 `promote`）
+    func testAiPromotionIsReplayableAndDeterministic() {
+        func run(_ seed: Int) -> (promotes: Int, maxLevel: Int, trace: String, replayOk: Bool) {
+            let bf = Battlefield(width: 14, height: 14,
+                                 terrain: Battlefield.generateTerrain(width: 14, height: 14, seed: 77))
+            XCTAssertTrue(bf.setDefaultLayout())
+            let ai = WarAI(bf: bf)
+            var promotes = 0, out: [String] = [], replayOk = true
+            for turn in 0..<30 {
+                for camp in [0, 1] {
+                    bf.beginTurn(camp: camp)
+                    let plan = ai.executeTurn(camp: camp, difficultyKey: "nightmare",
+                                              seed: seed &* 31 &+ turn &* 7 &+ camp)
+                    bf.restore(plan.before)
+                    for ev in plan.events {
+                        if ev.kind == .promote {
+                            promotes += 1
+                            XCTAssertNotNil(ev.branchKey, "转职事件必须带分支，否则重放无从下手")
+                        }
+                        if !Replay.apply(bf, ev) { replayOk = false }
+                        out.append("\(ev.unitId)\(ev.kind.rawValue)\(ev.branchKey ?? "-")")
+                    }
+                    if bf.snapshot() != plan.final { replayOk = false }
+                    bf.restore(plan.final)
+                }
+                if case .ended = bf.matchOutcome(forTurnOf: 0) { break }
+            }
+            return (promotes, bf.units.map(\.level).max() ?? 0, out.joined(separator: "|"), replayOk)
+        }
+        let a = run(9)
+        XCTAssertTrue(a.replayOk, "[P0] 含成长的回合重放必须与推演逐字段一致（成长字段全在快照里）")
+        XCTAssertEqual(a.trace, run(9).trace, "[P1] 同 seed 两局的成长与转职必须逐事件一致")
+        XCTAssertGreaterThan(a.maxLevel, 1, "整局里老兵必须真的练起了等级（否则经验链路根本没接上）")
+        // 整局能不能打到 10 级看地图与打期，不是不变式；真正的不变式是蕴含关系：
+        // “有人满级”就必须“有人转职”（否则 AI 侧的成长卡在 10 级不动）。
+        if a.maxLevel >= WarConfig.Growth.promoteLevel {
+            XCTAssertGreaterThan(a.promotes, 0, "已到 10 级却一条转职事件都没有 = 回合内成长链路断了")
+        }
+    }
+
+    /// AI 回合内的转职：事件带 branchKey 且可逐字段重放（不依赖整局运气，所以单独立夹具）
+    func testAiPromotionEventIsReplayableAndDifficultyDependent() {
+        func run(difficulty: String, seed: Int) -> (branch: String?, replayOk: Bool, levelCap: Int, promotes: Int) {
+            let veteran = WarConfig.Growth.UnitGrowth(level: WarConfig.Growth.promoteLevel)
+            let mine = WarUnit(id: 1, type: "infantry", camp: 0, x: 3, y: 3,
+                               autoGrows: true, growth: veteran)
+            let foe = WarUnit(id: 2, type: "infantry", camp: 1, x: 5, y: 3)
+            let bf = field(8, 8, [], [mine, foe])
+            let ai = WarAI(bf: bf)
+            bf.beginTurn(camp: 0)
+            let plan = ai.executeTurn(camp: 0, difficultyKey: difficulty, seed: seed)
+            let events = plan.events.filter { $0.kind == .promote }
+            bf.restore(plan.before)
+            var ok = true
+            for ev in plan.events where !Replay.apply(bf, ev) { ok = false }
+            // 重放之后那个子必须已经是转职形态（上限抬到 20），否则事件与盘面分成两套
+            return (events.first?.branchKey, ok && bf.snapshot() == plan.final,
+                    bf.findUnitById(1)?.levelCap ?? 0, events.count)
+        }
+        let normal = run(difficulty: "normal", seed: 3)
+        XCTAssertEqual(normal.promotes, 1, "[P0] 满 10 级的 AI 单位应在决策前就转职")
+        XCTAssertEqual(normal.branch, "guard", "低两档照表取第一个分支（简单 AI 不该看起来像在“做选择”）")
+        XCTAssertTrue(normal.replayOk, "[P0] 转职事件必须能被重放（推演与重放调同一个 promote）")
+        let hard = run(difficulty: "hard", seed: 3)
+        XCTAssertEqual(hard.branch, "lancer", "高两档走偏好表：困难/噩梦的兵是“练过的”")
+        XCTAssertEqual(hard.levelCap, WarConfig.Growth.promotedLevelCap, "转职后上限抬到 20")
+        XCTAssertEqual(run(difficulty: "hard", seed: 9).branch, hard.branch,
+                       "[P1] 分支选择不能掺随机：同难度任何 seed 都转同一条路")
+    }
+
     // MARK: - 军费配兵（经济 = 第四个难度旋钮）
 
     /// 每种魔法的最低充能价：配兵循环收手时余款必须买不起任何东西
@@ -676,8 +1033,9 @@ final class WarKitTests: XCTestCase {
             XCTAssertLessThan(plan!.leftover, cheapestCharge,
                               "余款必须花到买不动为止（否则军费旋钮漏花了）")
             for soldier in plan!.soldiers {
-                XCTAssertGreaterThanOrEqual(soldier.tier, 1)
-                XCTAssertLessThanOrEqual(soldier.tier, WarConfig.maxTier)
+                XCTAssertGreaterThanOrEqual(soldier.upgrades.atk, 0)
+                XCTAssertGreaterThanOrEqual(soldier.upgrades.def, 0)
+                XCTAssertGreaterThanOrEqual(soldier.upgrades.hp, 0)
                 XCTAssertNotEqual(soldier.typeKey, WarConfig.chiefTypeKey, "首领不花钱也不占兵位")
             }
         }
@@ -699,35 +1057,67 @@ final class WarKitTests: XCTestCase {
         XCTAssertGreaterThan(rich.spent, poor.spent, "高档必须真把钱花出去")
     }
 
-    /// 升档路径在预算充足时必须走得通（四档现行预算下余款先喂了充能，
+    /// 升级路径在预算充足时必须走得通（四档现行预算下余款先喂了充能，
     /// 所以这里直接给一个大预算验证“质量”这半条经济线不是死代码）。
     func testArmyComposerBuysUpgradesWhenRich() {
         let plan = ArmyComposer.compose(budget: 400)
         XCTAssertEqual(plan.soldierCount, WarConfig.soldiersPerSide, "先买满兵再谈质量")
-        XCTAssertTrue(plan.soldiers.contains { $0.tier > 1 },
-                      "余款必须买到档位（否则军费只是数量旋钮）")
+        XCTAssertTrue(plan.soldiers.contains { !$0.upgrades.isBase },
+                      "余款必须买到升级（否则军费只是数量旋钮）")
         XCTAssertEqual(plan.spent + plan.leftover, 400)
         XCTAssertLessThan(plan.leftover, cheapestCharge)
     }
 
-    /// 档位数值与价格都必须单调：AI 与玩家共用这张价目表，倒挂会让配兵决策变成笑话
-    func testTierStatsAndCostsAreMonotonic() {
+    /// 三线升级各自单调：升一条线只涨对应属性，value 恒定；升档费逐级变贵。AI 与玩家共用这张价目表。
+    func testUpgradeTracksAreMonotonicAndValueStable() {
         for key in WarConfig.unitTypeOrder {
-            var prev: WarConfig.UnitStat?
-            for tier in 1...WarConfig.maxTier {
-                let s = WarConfig.unitStat(key, tier: tier)!
-                if let prev {
-                    XCTAssertGreaterThanOrEqual(s.hp, prev.hp, "\(key) tier\(tier) hp 不能倒退")
-                    XCTAssertGreaterThanOrEqual(s.atk, prev.atk)
-                    XCTAssertGreaterThanOrEqual(s.def, prev.def)
-                    XCTAssertGreaterThan(s.value, prev.value, "AI 评分依赖 value 单调")
-                }
-                prev = s
+            let base = WarConfig.unitStat(key)!
+            // 攻击线：atk 随等级不降（小基数四舍五入可致平台），hp/def 不动，value 恒定
+            var prevAtk = base.atk
+            var atk6 = base.atk
+            for lv in 1...6 {
+                let s = WarConfig.unitStat(key, upgrades: WarConfig.Upgrades(atk: lv))!
+                XCTAssertGreaterThanOrEqual(s.atk, prevAtk, "\(key) 攻线 lv\(lv) atk 不能倒退")
+                XCTAssertEqual(s.hp, base.hp, "攻线不该动 hp")
+                XCTAssertEqual(s.def, base.def, "攻线不该动 def")
+                XCTAssertEqual(s.value, base.value, "value 必须恒定（AI 口径稳定）")
+                prevAtk = s.atk; atk6 = s.atk
+            }
+            XCTAssertGreaterThan(atk6, base.atk, "\(key) 攻线拉到 lv6 必须真变强")
+            // 防御线：只涨 def
+            var prevDef = base.def
+            var def6 = base.def
+            for lv in 1...6 {
+                let s = WarConfig.unitStat(key, upgrades: WarConfig.Upgrades(def: lv))!
+                XCTAssertGreaterThanOrEqual(s.def, prevDef, "\(key) 防线 lv\(lv) def 不能倒退")
+                XCTAssertEqual(s.hp, base.hp, "防线不该动 hp")
+                XCTAssertEqual(s.atk, base.atk, "防线不该动 atk")
+                prevDef = s.def; def6 = s.def
+            }
+            XCTAssertGreaterThan(def6, base.def, "\(key) 防线拉到 lv6 必须真变强")
+            // 生命线：只涨 hp
+            var prevHp = base.hp
+            var hp6 = base.hp
+            for lv in 1...6 {
+                let s = WarConfig.unitStat(key, upgrades: WarConfig.Upgrades(hp: lv))!
+                XCTAssertGreaterThanOrEqual(s.hp, prevHp, "\(key) 命线 lv\(lv) hp 不能倒退")
+                XCTAssertEqual(s.atk, base.atk, "命线不该动 atk")
+                XCTAssertEqual(s.def, base.def, "命线不该动 def")
+                prevHp = s.hp; hp6 = s.hp
+            }
+            XCTAssertGreaterThan(hp6, base.hp, "\(key) 命线拉到 lv6 必须真变强")
+        }
+        // 升档费随当前等级递增、无上限
+        for key in WarConfig.unitTypeOrder {
+            var prev = -1
+            for lv in 0...6 {
+                let cost = WarConfig.upgradeCost(typeKey: key, currentLevel: lv)
+                XCTAssertGreaterThan(cost, prev, "\(key) 升级费必须逐级变贵")
+                prev = cost
             }
         }
-        XCTAssertEqual(WarConfig.tierCosts.count, WarConfig.maxTier)
-        XCTAssertTrue(zip(WarConfig.tierCosts, WarConfig.tierCosts.dropFirst()).allSatisfy { $0 < $1 },
-                      "升档费必须逐档变贵")
+        // 首领不可升级
+        XCTAssertEqual(WarConfig.upgradeCost(typeKey: WarConfig.chiefTypeKey, currentLevel: 0), Int.max)
     }
 
     /// 布阵入口：传难度才走预算，不传一字不变（冒烟指纹与既有回归靠这条钉住）

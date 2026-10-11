@@ -8,6 +8,9 @@ public enum CandidateKind: String, Sendable, Codable {
     case moveAttack
     /// 首领施法（与普攻互斥：一个动作）
     case spell
+    /// 转职（不吃行动配额：它是等级到点的奖励，不是一个动作）。
+    /// 不进候选枚举（AI 在单位决策前就定了），只用于日志与事件的口径统一。
+    case promote
 }
 
 /// AI 的一个候选行动：位置 × 动作的**联合**决策。
@@ -216,6 +219,8 @@ public enum AiEventKind: String, Sendable {
     case attack
     /// 施法（含溅射/治疗/冻结三种子效果，统一由 `Battlefield.castSpell` 落账）
     case spell
+    /// 转职（无位移无伤害，重放就是 `Battlefield.promote`）
+    case promote
 }
 
 public struct AiEvent {
@@ -237,11 +242,15 @@ public struct AiEvent {
     public let spellKey: String?
     /// 施法事件的影响格（确定序）：溅射可能一次命中多格，飘字要逐格对齐
     public let affected: [GridPoint]
+    /// 转职事件的目标分支 key（其它事件为 nil）。
+    /// 它必须进事件：重放时要靠同一个 key 调 `promote`，否则动画会把 AI 转成的
+    /// 那个兵种在玩家屏幕上转成另一个（同 seed 两局因此分叉）。
+    public let branchKey: String?
 
     public init(kind: AiEventKind, unitId: Int, from: GridPoint, to: GridPoint, path: [GridPoint],
                 targetId: Int?, damage: Int, counterDamage: Int, killed: Bool, counterKilled: Bool,
                 spent: Int, score: Double, desc: String,
-                spellKey: String? = nil, affected: [GridPoint] = []) {
+                spellKey: String? = nil, affected: [GridPoint] = [], branchKey: String? = nil) {
         self.kind = kind
         self.unitId = unitId
         self.from = from
@@ -257,6 +266,7 @@ public struct AiEvent {
         self.desc = desc
         self.spellKey = spellKey
         self.affected = affected
+        self.branchKey = branchKey
     }
 }
 

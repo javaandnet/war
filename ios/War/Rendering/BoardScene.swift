@@ -399,13 +399,35 @@ final class BoardScene: SKScene {
         spellCount.isHidden = true
         node.addChild(spellCount)
 
+        // 成长角标：左上 = 战场等级，左下 = 可转职的金色 ↑（右上角留给魔法图标）。
+        // 两者都靠 `decorate` 刷隐现，小格上直接不画（同 spellIcon 的约定）。
+        let levelTag = SKLabelNode()
+        levelTag.name = "levelTag"
+        levelTag.fontName = "HelveticaNeue-Bold"
+        levelTag.fontSize = cell * 0.22
+        levelTag.verticalAlignmentMode = .center
+        levelTag.position = CGPoint(x: -cell * 0.33, y: cell * 0.32)
+        levelTag.isHidden = true
+        node.addChild(levelTag)
+
+        let promoteTag = SKLabelNode(text: "↑")
+        promoteTag.name = "promoteTag"
+        promoteTag.fontName = "HelveticaNeue-Bold"
+        promoteTag.fontSize = cell * 0.28
+        promoteTag.verticalAlignmentMode = .center
+        promoteTag.position = CGPoint(x: -cell * 0.32, y: -cell * 0.36)
+        promoteTag.isHidden = true
+        node.addChild(promoteTag)
+
         decorate(node, with: unit)
         return node
     }
 
     /// 兵种图标：棋盘与面板共用 `Theme.unitIcons`，保证同一个兵种到处同形。
+    /// 读的是**当前生效兵种**（`typeKey`）：转职后那个子就该换成 branch 的形状，
+    /// 而基础兵种（价目/升级账）仍留在 `type` 里，两者在 `UnitView` 上是两个字段。
     private func applyUnitIcon(_ icon: SKSpriteNode, glyph: SKLabelNode, unit: BoardFrame.UnitView) {
-        guard let name = Theme.unitIconName(for: unit.type),
+        guard let name = Theme.unitIconName(for: unit.typeKey),
               let tex = Self.texture(symbol: name, pointSize: cell * 0.60) else {
             icon.isHidden = true
             glyph.isHidden = false
@@ -418,16 +440,26 @@ final class BoardScene: SKScene {
     }
 
     private func decorate(_ node: SKNode, with unit: BoardFrame.UnitView) {
-        let base = unit.camp == 0
+        // 阵营原色 = 本回合还能行动；行动完成后整块换成灰调。
+        // 只靠透明度分不开“动完了”与“还没动”，所以颜色才是主信号。
+        let live = unit.camp == 0
             ? SKColor(red: 0.25, green: 0.52, blue: 0.95, alpha: 1)
             : SKColor(red: 0.92, green: 0.34, blue: 0.28, alpha: 1)
-        (node.childNode(withName: "body") as? SKShapeNode)?.fillColor = base
+        let done = unit.camp == 0
+            ? SKColor(red: 0.30, green: 0.36, blue: 0.44, alpha: 1)
+            : SKColor(red: 0.44, green: 0.33, blue: 0.31, alpha: 1)
+        (node.childNode(withName: "body") as? SKShapeNode)?.fillColor = unit.spent ? done : live
         (node.childNode(withName: "body") as? SKShapeNode)?.strokeColor =
             unit.selected ? SKColor.white : SKColor(white: 0, alpha: 0.35)
         (node.childNode(withName: "body") as? SKShapeNode)?.lineWidth = unit.selected ? 2.2 : 1.2
 
         (node.childNode(withName: "glyph") as? SKLabelNode)?.text = unit.symbol
         (node.childNode(withName: "glyph") as? SKLabelNode)?.fontColor = .white
+        // 图标每次刷：转职会换兵种形状，而节点不重建（纹理走 `textureCache`，不掏新资源）
+        if let icon = node.childNode(withName: "icon") as? SKSpriteNode,
+           let glyph = node.childNode(withName: "glyph") as? SKLabelNode {
+            applyUnitIcon(icon, glyph: glyph, unit: unit)
+        }
 
         if let hp = node.childNode(withName: "hp") as? SKLabelNode {
             hp.text = "\(unit.hp)"
@@ -440,7 +472,7 @@ final class BoardScene: SKScene {
             ap.isHidden = cell < 20      // 小格上这行会跟邻居压字，不如不画
         }
 
-        node.alpha = unit.spent ? 0.45 : 1.0
+        node.alpha = unit.spent ? 0.72 : 1.0
         node.zPosition = unit.selected ? 25 : 20
 
         // 首领：常驻金环。它同时是斩首判据与全场唯一能施法的人，必须在一堆
@@ -505,6 +537,19 @@ final class BoardScene: SKScene {
             halo.fillColor = .clear
             node.addChild(halo)
         }
+
+        // 成长角标：等级数字只在**真升过级**时画（开局人人 1 级，满屏“1”是噪声），
+        // 可转职时多一枚金色 ↑ —— 它是“只差你点一下”的提醒，不提醒就会有人卡在 10 级。
+        if let levelTag = node.childNode(withName: "levelTag") as? SKLabelNode {
+            levelTag.text = "\(unit.level)"
+            levelTag.fontColor = unit.canPromote
+                ? SKColor(red: 0.85, green: 0.72, blue: 0.35, alpha: 1) : SKColor(white: 1, alpha: 0.85)
+            levelTag.isHidden = cell < 26 || unit.level <= 1
+        }
+        if let promoteTag = node.childNode(withName: "promoteTag") as? SKLabelNode {
+            promoteTag.fontColor = SKColor(red: 0.85, green: 0.72, blue: 0.35, alpha: 1)
+            promoteTag.isHidden = cell < 26 || !unit.canPromote
+        }
     }
 
     // MARK: - 飘字
@@ -521,6 +566,7 @@ final class BoardScene: SKScene {
             case .spell: label.fontColor = SKColor(red: 1, green: 0.45, blue: 0.15, alpha: 1)
             case .heal: label.fontColor = SKColor(red: 0.45, green: 0.95, blue: 0.55, alpha: 1)
             case .freeze: label.fontColor = SKColor(red: 0.55, green: 0.85, blue: 1.0, alpha: 1)
+            case .promote: label.fontColor = SKColor(red: 0.85, green: 0.72, blue: 0.35, alpha: 1)
             }
             let start = center(of: GridPoint(x: effect.x, y: effect.y))
             label.position = CGPoint(x: start.x, y: start.y + cell * 0.3)

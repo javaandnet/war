@@ -16,7 +16,7 @@ import WarKit
 //   5. 军费不变式：余额永不为负、补贴每局仅一次、买断与充能的界限不串。
 //
 // 渲染层（SpriteKit/UIKit）不在覆盖范围内 —— 那部分只能靠模拟器或真机看。
-// 跑法：sh tools/smoke.sh（WAR_SMOKE_ONLY=manual|auto|intel|chief|wallet 单跑一段）
+// 跑法：sh tools/smoke.sh（WAR_SMOKE_ONLY=manual|auto|intel|chief|wallet|campaign 单跑一段）
 // ============================================================
 
 // MARK: - 断言
@@ -116,9 +116,9 @@ func checkFrameSequence(_ frames: [BoardFrame], context: String, allowSpawn: Boo
     var unjustifiedHeals = 0
     for (index, pair) in zip(frames, frames.dropFirst()).enumerated() {
         let previous = Dictionary(uniqueKeysWithValues: pair.0.units.map { ($0.id, $0) })
-        // 首领的治疗魔法是全场唯一的回血来源：允许 hp 上升，但同一帧
-        // 那一格必须带 .heal 飘字 —— 只断“不许回血”会把合法施法误判成 bug，
-        // 断“回血必带原因”才同时钉住了时机、原因与盘面自洽。
+        // 首领的治疗魔法与**战场成长**是仅有的两种回血来源：hp 上升时，同一帧那一格
+        // 要么带 .heal 飘字，要么它的上限确实抬高了（升级/加点/转职都走 `refreshStats` 的补进）。
+        // 只断“不许回血”会把合法施法误判成 bug，断“回血必带原因”才同时钉住了时机、原因与盘面自洽。
         let healCells = Set(pair.1.effects.filter { $0.kind == .heal }.map { "\($0.x),\($0.y)" })
         for u in pair.1.units {
             guard let old = previous[u.id] else { appearances += 1; continue }
@@ -130,7 +130,7 @@ func checkFrameSequence(_ frames: [BoardFrame], context: String, allowSpawn: Boo
             }
             if u.hp > old.hp {
                 heals += 1
-                if !healCells.contains("\(u.x),\(u.y)") { unjustifiedHeals += 1 }
+                if !healCells.contains("\(u.x),\(u.y)"), u.maxHp <= old.maxHp { unjustifiedHeals += 1 }
             }
         }
     }
@@ -395,6 +395,8 @@ func smokeAutoMatch() {
                 expect(soldiersGone, "标为歼灭局：败方士兵确实全灭")
             case .turnLimit:
                 expect(watcher.turnCount >= WarConfig.maxTurns, "标为回合上限：确实打满")
+            case .surrender:
+                expect(false, "观战局没有投降入口，不该被标为投降")
             case .none:
                 expect(false, "对局已结束却没有结束原因")
             }
@@ -647,7 +649,7 @@ func smokeWalletEconomy() {
     fresh.gold = 500
     expect(!fresh.buyCharge("heal"), "未买断的魔法买不了充能")
     expect(fresh.gold == 500, "这一步分文未扣：买断与充能的先后顺序不由 UI 兜着")
-    expect(!fresh.upgradeUnitTier(WarConfig.chiefTypeKey), "首领不卖：不能给首领升档")
+    expect(!fresh.upgradeTrack(WarConfig.chiefTypeKey, .attack), "首领不卖：不能给首领升级")
 
     var tight = Wallet()
     tight.gold = Wallet.unlockCost("fireball") - 1
@@ -658,23 +660,29 @@ func smokeWalletEconomy() {
     expect(tight.gold == 0 && tight.charges["fireball"] == 1, "余额恰好清零而不是变负数")
     expect(!tight.buyCharge("fireball") && tight.gold == 0, "余额为 0 时再买仍被拒")
 
-    // —— 升档（跨局永久，该型兵一起升）——
+    // —— 升级（攻/防/生命 三线独立、无上限）——
     var up = Wallet()
     up.gold = 1000
-    let firstUpgrade = up.upgradeCost("infantry") ?? -1
-    expect(firstUpgrade == WarConfig.tierCosts[1] && up.upgradeUnitTier("infantry"),
-           "步兵升一档收 tierCosts[1]（\(firstUpgrade)）")
-    expect(up.tier(of: "infantry") == 2 && up.gold == 1000 - firstUpgrade, "升档后档位与余额同步")
-    _ = up.upgradeUnitTier("infantry")
-    expect(up.tier(of: "infantry") == WarConfig.maxTier && up.upgradeCost("infantry") == nil,
-           "满档后不再报价（也不该再收钱）")
-    expect(!up.upgradeUnitTier("infantry") && up.tier(of: "infantry") == WarConfig.maxTier,
-           "满档再升被拒")
+    let firstUpgrade = up.upgradeCost("infantry", track: .attack)
+    expect(firstUpgrade == WarConfig.upgradeCost(typeKey: "infantry", currentLevel: 0)
+           && up.upgradeTrack("infantry", .attack),
+           "步兵攻线升一档收 upgradeCost(currentLevel:0)（\(firstUpgrade)）")
+    expect(up.upgrades(of: "infantry").atk == 1 && up.gold == 1000 - firstUpgrade, "升攻后等级与余额同步")
+    // 三线彼此独立：升防/升命不碰攻线等级
+    expect(up.upgradeTrack("infantry", .defense) && up.upgradeTrack("infantry", .health),
+           "同型兵可各自升防/升命")
+    let u = up.upgrades(of: "infantry")
+    expect(u.atk == 1 && u.def == 1 && u.hp == 1, "三条线各记各的等级（互不串）")
+    // 无上限：连升攻线，报价随等级递增且始终可再升
+    let costLow = up.upgradeCost("infantry", track: .attack)
+    _ = up.upgradeTrack("infantry", .attack)
+    let costHigh = up.upgradeCost("infantry", track: .attack)
+    expect(costHigh > costLow, "升级费随等级递增（无满档封顶）")
 
     // —— 一键开战：只买非买不可的钱 ——
     var quick = Wallet()
     quick.gold = 100
-    let plan = quick.playerQuickDeployPlan()
+    let plan = quick.playerQuickDeployPlan(unitUpgrades: [:])
     expect(plan.soldiers.count == 4 && quick.gold == 0,
            "100 金按默认模板买到买不起为止（\(plan.soldiers.count) 兵、恰余 \(quick.gold)，不为负）")
     expect(plan.spellCharges.isEmpty, "一键开战不自动买充能、不自动升档（那是面板上的主动选择）")
@@ -710,22 +718,59 @@ func smokeWalletEconomy() {
     cycle.save()
     expect(Wallet.load() == cycle, "落盘后读回一致（App 重启不会忘账）")
 
-    expect(store.wallet.unlockedSpells.isEmpty && store.wallet.unitTiers.isEmpty && store.wallet.charges.isEmpty,
+    expect(store.wallet.unlockedSpells.isEmpty && store.wallet.unitUpgrades.isEmpty && store.wallet.charges.isEmpty,
            "上面在局部钱包上的买卖不会回写进对局（值类型拷贝，账目互不串）")
+
+    // —— 钱包按模式隔离（四个模式各记一本）——
+    var campSeed = Wallet()
+    campSeed.gold = 777
+    campSeed.save(for: .campaign)
+    let beforeSwitch = store.wallet.gold              // 对战账上已拿过一份补贴
+    store.settings = makeSettings(mode: .campaign)
+    store.newGame()
+    pump(0.02)
+    expect(store.wallet.gold == 777 + Wallet.battleStipend,
+           "切到闯关＝读闯关那本账（不受对战账影响：\(store.wallet.gold)）")
+    store.settings = makeSettings(mode: .vsAI)
+    store.newGame()
+    pump(0.02)
+    expect(store.wallet.gold == beforeSwitch,
+           "切回对战＝旧账原样回来，闯关那笔没混进来（\(store.wallet.gold)）")
+    expect(Wallet.load(for: .campaign).gold == 777 + Wallet.battleStipend,
+           "闯关账落在自己的键上（没盖掉对战账）")
+
+    // —— 手动布阵后点「一键布阵开战」：先前扣的钱必须原路退回 ——
+    var manualGold = Wallet()
+    manualGold.gold = 1000
+    let rejoin = GameStore(settings: makeSettings(mode: .vsAI), wallet: manualGold)
+    let twoSoldiers = Wallet.cost(ofUnit: "infantry") + Wallet.cost(ofUnit: "cavalry")
+    rejoin.placeUnit(type: "infantry", at: GridPoint(x: 1, y: 4))
+    rejoin.placeUnit(type: "cavalry", at: GridPoint(x: 1, y: 5))
+    pump(0.02)
+    let afterManual = rejoin.wallet.gold
+    let rosterCost = WarConfig.defaultRoster.reduce(0) { $0 + Wallet.cost(ofUnit: $1) }
+    rejoin.quickDeploy()
+    pump(0.02)
+    expect(rejoin.wallet.gold == afterManual + twoSoldiers - rosterCost,
+           "一键开战先退手动那批（+\(twoSoldiers)）再买新的一批（-\(rosterCost)）：\(rejoin.wallet.gold)")
+    expect(rejoin.wallet.spentThisBattle == rosterCost,
+           "本局已花只计新这一批，不拿上一批重复报数（记了 \(rejoin.wallet.spentThisBattle)）")
+    expect(rejoin.soldierCount(camp: 0) == WarConfig.soldiersPerSide,
+           "退款后确实重建了一支满编军（\(rejoin.soldierCount(camp: 0)) 兵）")
 
     // —— 面板买到的东西真的上了场（表现层与内核同一个口径）——
     var rich = Wallet()
     rich.gold = 1000
     let shop = GameStore(settings: makeSettings(mode: .vsAI), wallet: rich)
-    shop.purchaseTierUpgrade("infantry")
-    expect(shop.wallet.tier(of: "infantry") == 2, "军费面板升一档生效")
+    shop.purchaseUpgrade("infantry", track: .health)
+    expect(shop.wallet.upgrades(of: "infantry").hp == 1, "军费面板升生命一线生效")
     shop.placeUnit(type: "infantry", at: GridPoint(x: 1, y: 4))
     shop.placeUnit(type: WarConfig.chiefTypeKey, at: GridPoint(x: 0, y: 3))
     pump(0.02)
     let raised = shop.frame.units.first { $0.type == "infantry" }
-    expect(raised?.tier == 2, "布阵放出的兵带着买到的档位上场")
-    expect(raised?.maxHp == WarConfig.unitStat("infantry", tier: 2)?.hp,
-           "档位数值由内核倍率决定（UI 不自己乘）：\(raised?.maxHp ?? -1) vs \(WarConfig.unitStat("infantry", tier: 2)?.hp ?? -1)")
+    expect(raised?.upgrades.hp == 1, "布阵放出的兵带着买到的升级上场")
+    expect(raised?.maxHp == WarConfig.unitStat("infantry", upgrades: WarConfig.Upgrades(hp: 1))?.hp,
+           "升级数值由内核倍率决定（UI 不自己乘）：\(raised?.maxHp ?? -1) vs \(WarConfig.unitStat("infantry", upgrades: WarConfig.Upgrades(hp: 1))?.hp ?? -1)")
     // 先放首领、再买断再买发数：携带表必须跟着刷新，不能要求玩家记住一个隐形顺序
     shop.purchaseSpellUnlock("heal")
     shop.purchaseCharge("heal")
@@ -734,6 +779,430 @@ func smokeWalletEconomy() {
     let chiefView = shop.frame.units.first { $0.isChief && $0.camp == 0 }
     expect(chiefView?.spellCharges["heal"] == 1,
            "已放下的首领当场拿到新买的充能（不必重开一局）")
+
+    // —— 魔法升档（军费买档：跨局永久，与充能分家）——
+    var richLevel = Wallet()
+    richLevel.gold = 2000
+    let armory = GameStore(settings: makeSettings(mode: .vsAI), wallet: richLevel)
+    armory.placeUnit(type: WarConfig.chiefTypeKey, at: GridPoint(x: 0, y: 3))
+    armory.purchaseSpellUnlock("fireball")
+    pump(0.02)
+    let goldBefore = armory.wallet.gold
+    let levelCost0 = Wallet.spellLevelCost("fireball", currentLevel: 0)
+    expect(armory.wallet.spellLevel("fireball") == 0, "刚买断＝基础档 0（升档是另一笔钱）")
+    armory.purchaseSpellLevel("fireball")
+    pump(0.02)
+    expect(armory.wallet.spellLevel("fireball") == 1 && armory.wallet.gold == goldBefore - levelCost0,
+           "升一档收 spellUpgradeCost 且档位入账（-\(levelCost0)）")
+    expect((WarConfig.spellStat("fireball", level: 1)?.power ?? 0) > (WarConfig.spells["fireball"]?.power ?? 0),
+           "威力读数由内核纯函数给出（升档后确实变大）")
+    expect(armory.frame.units.first { $0.isChief && $0.camp == 0 }?.spellLevels["fireball"] == nil,
+           "没买充能的魔法不该带上档位（不出现“会升档却一发没带”）")
+    armory.purchaseCharge("fireball")
+    pump(0.02)
+    let carried = armory.frame.units.first { $0.isChief && $0.camp == 0 }
+    expect(carried?.spellLevels["fireball"] == 1 && carried?.spellCharges["fireball"] == 1,
+           "买了发数之后首领当场带上档位")
+
+    var maxed = Wallet()
+    maxed.gold = 100_000
+    maxed.unlockSpell("heal")
+    for _ in 0..<WarConfig.maxSpellLevel { _ = maxed.upgradeSpellLevel("heal") }
+    let goldAtCap = maxed.gold
+    expect(maxed.spellLevel("heal") == WarConfig.maxSpellLevel && !maxed.upgradeSpellLevel("heal")
+           && maxed.gold == goldAtCap,
+           "顶档之后不再收钱（余额停在 \(goldAtCap)）")
+}
+
+// MARK: - 用例 9：投降与闯关进度
+
+/// 这两件事共用一条结算通道，所以一起测：投降必须只走败局语义（不能变成“第二份奖金”），
+/// 而闯关进度必须在**胜利当场**落盘（旧写法把 +1 押在“点下一关”，赢了之后切后台就能反复刷同一关的奖金）。
+@MainActor
+func smokeSurrenderAndCampaign() {
+    section("9. 投降：只走败局结算；闯关：胜利当场记进度")
+
+    UserDefaults.standard.removeObject(forKey: GameStore.CampaignProgress.userDefaultsKey)
+
+    // —— vsAI 投降：走败局安慰金，战绩归败局、不涨胜场 ——
+    var vsWallet = Wallet()
+    vsWallet.gold = 300
+    let duel = GameStore(settings: makeSettings(mode: .vsAI, difficulty: "easy"), wallet: vsWallet)
+    duel.placeUnit(type: "infantry", at: GridPoint(x: 1, y: 4))
+    duel.finishPlacement()          // 内部自动补齐 AI 首领，无需对手参与
+    pump(0.05)
+    expect(duel.phase == .battle, "完成布阵后进入战斗期（当前 \(duel.statusLine)）")
+    let goldBeforeGiveUp = duel.wallet.gold
+    duel.surrender()
+    pump(0.02)
+    if case .over(let w) = duel.phase { expect(w == 1, "投降＝敌方获胜（winner=1）") }
+    else { expect(false, "投降后应结束") }
+    expect(duel.endReasonText == "主动投降", "结局原因写明“主动投降”（实得：\(duel.endReasonText)）")
+    expect(duel.lastSettlement?.outcome == .loss
+           && duel.lastSettlement?.bonus == Wallet.lossConsolation
+           && duel.wallet.gold == goldBeforeGiveUp + Wallet.lossConsolation,
+           "投降只吃败局安慰金（+\(duel.lastSettlement?.bonus ?? -1)），不另开一条发钱口")
+    expect(duel.wallet.losses == 1 && duel.wallet.wins == 0 && duel.wallet.pendingBattleID == nil,
+           "战绩归败局且本局已结清（结不了第二次）")
+
+    // —— 投降不越过守卫：已结束的局里不能再认输 ——
+    let after = duel.wallet.gold
+    duel.surrender()
+    pump(0.02)
+    expect(duel.wallet.gold == after, "已结束的局不能再投降刷钱（余额仍 \(duel.wallet.gold)）")
+
+    // —— 双人投降：只结束本局，不动任何钱 ——
+    var twin = Wallet()
+    twin.gold = 500
+    let tw = GameStore(settings: makeSettings(mode: .manual), wallet: twin)
+    tw.newGame(autoLayout: true)
+    pump(0.05)
+    let twinGold = tw.wallet.gold
+    tw.surrender()
+    pump(0.02)
+    if case .over(let w) = tw.phase { expect(w == 1, "蓝方认输 → 红方胜（当前 \(w)）") }
+    expect(tw.wallet.gold == twinGold && tw.lastSettlement == nil, "双人不动军费（余额 \(tw.wallet.gold)）")
+
+    // —— 闯关胜利当场落盘（切后台不丢进度、不刷奖金）——
+    UserDefaults.standard.removeObject(forKey: Wallet.key(for: .campaign))
+    var campWallet = Wallet()
+    campWallet.gold = 200
+    let camp = GameStore(settings: makeSettings(mode: .campaign), wallet: campWallet)
+    expect(camp.campaign.currentLevel == 1, "无存档时从第 1 关开始")
+    camp.placeUnit(type: "infantry", at: GridPoint(x: 1, y: 4))
+    camp.placeUnit(type: WarConfig.chiefTypeKey, at: GridPoint(x: 0, y: 3))
+    camp.finishPlacement()
+    pump(0.05)
+    expect(camp.phase == .battle, "闯关布阵后开战（\(camp.statusLine)）")
+    let winGold = camp.wallet.gold
+    let winBonus = Wallet.winBonusBase + (Wallet.difficultyBonus["easy"] ?? 0)
+    camp.finish(winner: 0)          // 结算的唯一出口（冒烟直接验证“胜利当场”这一条）
+    pump(0.02)
+    expect(camp.phase == .over(winner: 0) && camp.campaign.currentLevel == 2,
+           "胜利当场就把进度推前（不再等“点下一关”）")
+    expect(camp.lastSettlement?.bonus == winBonus && camp.wallet.gold == winGold + winBonus,
+           "胜利奖金当场入账（\(winGold) → \(camp.wallet.gold)）")
+    expect(camp.lastCampaignLevel == 1, "结局卡片仍能说出刚打完的是哪一关")
+    camp.scenePhaseChanged(.background)
+    camp.scenePhaseChanged(.active)
+    pump(0.02)
+    expect(GameStore.CampaignProgress.load().currentLevel == 2
+           && GameStore.CampaignProgress.load().maxLevelReached == 2,
+           "切后台/回前台不丢进度（重读存档：第 \(GameStore.CampaignProgress.load().currentLevel) 关）")
+    camp.exitCampaign()
+    pump(0.02)
+    let reloaded = GameStore(settings: makeSettings(mode: .campaign))
+    expect(reloaded.campaign.currentLevel == 2 && reloaded.campaign.maxLevelReached == 2,
+           "杀进程重进＝续打下一关（读回第 \(reloaded.campaign.currentLevel) 关）")
+
+    // —— 旧存档（没记“最高关”）不能被新字段解崩 ——
+    UserDefaults.standard.set(#"{"currentLevel":6,"unitUpgrades":{}}"#.data(using: .utf8)!,
+                              forKey: GameStore.CampaignProgress.userDefaultsKey)
+    let legacy = GameStore.CampaignProgress.load()
+    expect(legacy.currentLevel == 6 && legacy.maxLevelReached == 6 && legacy.unitUpgrades.isEmpty,
+           "旧闯关存档仍可解（缺字段逐键兜底：第 \(legacy.currentLevel) 关）")
+
+    // —— 败局回滚 ——
+    var loseWallet = Wallet()
+    loseWallet.gold = 400
+    let fail = GameStore(settings: makeSettings(mode: .campaign), wallet: loseWallet)
+    fail.placeUnit(type: "infantry", at: GridPoint(x: 1, y: 4))
+    fail.purchaseUpgrade("infantry", track: .attack)      // 入关快照之后升一档
+    let entry = fail.campaign.entrySnapshot?.gold ?? -1
+    let levelAtEntry = fail.campaign.currentLevel
+    fail.finishPlacement()
+    pump(0.05)
+    fail.surrender()
+    pump(0.02)
+    expect(fail.campaign.currentLevel == levelAtEntry, "未过关则关数不动（仍第 \(fail.campaign.currentLevel) 关）")
+    expect(fail.wallet.gold == entry, "败局连同补贴与已花的钱一起回到入关快照（\(entry)）")
+    expect(fail.campaign.unitUpgrades.isEmpty, "升级账随败局一起回滚")
+}
+
+// MARK: - 用例 10：战场成长（等级 → 属性点 → 转职）与闯关带回
+
+/// 成长体系最容易出错的地方不在公式，而在**口径归属**：经验只能由内核发、点数只能由
+/// `Battlefield.allocate` 花、兵种只能由 `Battlefield.promote` 改，而“练到哪一级”只有打赢的那一关带得走。
+/// 这一段专盯四条越权路径：App 层不碰字段、守卫不给静默、非法分支不给过、账本不串模式。
+@MainActor
+func smokeGrowthAndPromotion() {
+    section("10. 战场成长：加点与转职守卫、闯关带回与回滚")
+
+    UserDefaults.standard.removeObject(forKey: GameStore.CampaignProgress.userDefaultsKey)
+
+    var fresh = Wallet()
+    fresh.gold = 500
+    let vs = GameStore(settings: makeSettings(mode: .vsAI, difficulty: "easy"), wallet: fresh)
+    vs.placeUnit(type: "infantry", at: GridPoint(x: 1, y: 4))
+    vs.finishPlacement()
+    pump(0.05)
+
+    let rookie = vs.frame.units.first { $0.camp == 0 && $0.type == "infantry" }
+    expect(rookie?.level == 1 && (rookie?.attrBank ?? -1) == 0 && (rookie?.canPromote ?? true) == false,
+           "新步兵以 1 级零点数上场（等级/角标都读内核）")
+    vs.select(rookie?.id ?? -1)
+    expect(vs.canAllocateSelected == false && vs.canPromoteSelected == false,
+           "行动面板的加点/转职按钮对 1 级兵都不亮")
+    vs.allocateSelected(track: .attack)
+    expect(vs.hint?.contains("没有待分配属性点") == true, "无点可分时说得出原因（提示：\(vs.hint ?? "无")）")
+
+    // 升级只走内核经验入口：App 层不写 level / attrBank
+    vs.selectedUnit()?.addExp(WarConfig.Growth.expToNext(1) + WarConfig.Growth.expToNext(2))
+    vs.select(rookie?.id ?? -1)
+    expect(vs.selectedUnit()?.level == 3
+           && (vs.frame.units.first { $0.id == rookie?.id }?.attrBank ?? -1) == 2,
+           "经验到点逐级升上去，每级到账 1 点（帧里读的也是内核值）")
+    expect(vs.canAllocateSelected, "手里有点可分才轮到按钮亮")
+    let atkBefore = vs.selectedUnit()?.atk ?? 0
+    let hpBefore = vs.selectedUnit()?.maxHp ?? 0
+    vs.allocateSelected(track: .attack)
+    expect((vs.selectedUnit()?.atk ?? 0) == atkBefore + WarConfig.Growth.perPointAtk,
+           "加攻按固定点数生效（+\(WarConfig.Growth.perPointAtk)，UI 不自己算）")
+    vs.allocateSelected(track: .health)
+    expect((vs.selectedUnit()?.maxHp ?? 0) == hpBefore + WarConfig.Growth.perPointHp,
+           "加血抬上限（+\(WarConfig.Growth.perPointHp)）而不会顺手把攻也抬了")
+    expect(vs.selectedUnit()?.attrAlloc.atk == 1 && vs.selectedUnit()?.attrAlloc.hp == 1
+           && (vs.selectedUnit()?.attrBank ?? -1) == 0,
+           "已分点数记在属性账上，待分配归零")
+    vs.allocateSelected(track: .defense)
+    expect(vs.selectedUnit()?.attrAlloc.def == 0 && vs.hint?.contains("没有待分配属性点") == true,
+           "花完再花只吃一句提示（不出现负点数）：\(vs.hint ?? "无")")
+
+    // 顶到未转职上限：点数必须锁在手里，逼出“二选一”这个决定
+    vs.selectedUnit()?.addExp(10_000)
+    vs.select(rookie?.id ?? -1)
+    let capped = vs.selectedUnit()
+    expect(capped?.level == WarConfig.Growth.baseLevelCap && capped?.expIntoLevel == 0,
+           "经验溢出到顶即作废（停在 \(WarConfig.Growth.baseLevelCap) 级，不给白攒）")
+    expect((capped?.attrBank ?? 0) > 0 && vs.canPromoteSelected,
+           "满级未转职：点数在手而转职按钮亮了")
+    vs.allocateSelected(track: .attack)
+    expect(vs.selectedUnit()?.attrAlloc.atk == 1 && vs.hint?.contains("先转职") == true,
+           "未转职时加点被内核拒（提示：\(vs.hint ?? "无")）")
+
+    vs.promoteSelected(to: "crossbow")        // 弓兵的分支：步兵转不过去
+    expect(vs.selectedUnit()?.typeKey == "infantry" && vs.hint?.contains("不属于此兵种") == true,
+           "非法分支按兵种表拒绝（提示：\(vs.hint ?? "无")）")
+    let branch = vs.selectedUnit()?.promotionOptions.first ?? ""
+    let hpCapped = vs.selectedUnit()?.maxHp ?? 0
+    let bankCapped = vs.selectedUnit()?.attrBank ?? 0
+    vs.promoteSelected(to: branch)
+    let promoted = vs.selectedUnit()
+    expect(promoted?.typeKey == branch && promoted?.type == "infantry" && promoted?.branchKey == branch,
+           "转职换 typeKey（\(branch)）而基础兵种不变：价目与升级账仍按步兵查")
+    expect(promoted?.levelCap == WarConfig.Growth.promotedLevelCap && vs.canPromoteSelected == false,
+           "上限抬到 \(WarConfig.Growth.promotedLevelCap) 级且不可再转")
+    expect((promoted?.maxHp ?? 0) >= hpCapped && (promoted?.attrBank ?? -1) == bankCapped + 1,
+           "转职发 1 点，HP 上限只涨不跌（涨的那截补进当前血）")
+    vs.allocateSelected(track: .defense)
+    expect(vs.selectedUnit()?.attrAlloc.def == 1, "转职之后同一批点数才加得出去")
+    expect(vs.frame.units.first { $0.id == rookie?.id }?.canPromote == false,
+           "帧里的转职角标随内核熄灭（不会出现“能转第二次”的按钮）")
+
+    // 成长只在局内：其它模式练到顶也不该记进任何账本
+    vs.finish(winner: 0)
+    pump(0.02)
+    expect(vs.campaign.unitGrowth.isEmpty && vs.activeGrowth(for: "infantry") == nil,
+           "对战模式的等级不写闯关账（模式间不串账）")
+
+    // —— 闯关：只有打赢的那一关算“练过”，等级按兵种带回下一关 ——
+    var campWallet = Wallet()
+    campWallet.gold = 300
+    let camp = GameStore(settings: makeSettings(mode: .campaign), wallet: campWallet)
+    camp.placeUnit(type: "infantry", at: GridPoint(x: 1, y: 4))
+    camp.placeUnit(type: WarConfig.chiefTypeKey, at: GridPoint(x: 0, y: 3))
+    camp.finishPlacement()
+    pump(0.05)
+    let vet = camp.frame.units.first { $0.camp == 0 && $0.type == "infantry" }
+    camp.select(vet?.id ?? -1)
+    camp.selectedUnit()?.addExp(10_000)
+    camp.promoteSelected(to: "lancer")
+    camp.finish(winner: 0)
+    pump(0.02)
+    let ledger = GameStore.CampaignProgress.load()
+    expect(ledger.unitGrowth["infantry"]?.level == WarConfig.Growth.baseLevelCap,
+           "胜利当场把“步兵练到 \(WarConfig.Growth.baseLevelCap) 级”写进跨关账（键 = 基础兵种）")
+    expect(ledger.unitGrowth["infantry"]?.branch == "lancer",
+           "带回下关的是“步兵练过而且转成了枪兵”（分支记在值里）")
+    expect(ledger.unitGrowth["commander"] == nil, "没练过的首领不占账位")
+
+    camp.newGame(autoLayout: true)
+    pump(0.05)
+    let brought = camp.frame.units.first { $0.camp == 0 && $0.type == "infantry" }
+    expect(brought?.level == WarConfig.Growth.baseLevelCap && brought?.typeKey == "lancer",
+           "下一关一键开战：步兵带着 \(brought?.level ?? -1) 级的「"
+           + "\(WarConfig.unitTypes[brought?.typeKey ?? ""]?.name ?? "?")」形态上场")
+    let owed = WarConfig.Growth.grantedPoints(level: WarConfig.Growth.baseLevelCap, promoted: true)
+    expect(brought?.attrBank == owed,
+           "存盘只记等级与已分点，待分配点数回推（\(brought?.attrBank ?? -1) 点 = 应发 − 已分）")
+    expect(camp.frame.units.filter { $0.camp == 1 }.allSatisfy { $0.level == 1 },
+           "敌军永不带成长（同关两局不能因为玩家练到哪而分叉）")
+
+    // 败局：成长与钱、升级账一起回到入关那一刻（否则“失败重试”能靠反复送死把等级堆上去）
+    let chiefView = camp.frame.units.first { $0.camp == 0 && $0.isChief }
+    camp.select(chiefView?.id ?? -1)
+    camp.selectedUnit()?.addExp(10_000)
+    camp.surrender()
+    pump(0.02)
+    expect(camp.campaign.unitGrowth["commander"] == nil
+           && camp.campaign.unitGrowth["infantry"]?.level == WarConfig.Growth.baseLevelCap,
+           "败局只作废本关练出来的等级（入关那一份 10 级枪兵还在）")
+    expect(GameStore.CampaignProgress.load().currentLevel == 2, "败局不推关（仍在第 2 关）")
+}
+
+// MARK: - 用例 11：军费反悔（退兵档 / 退魔法档 / 退充能）
+
+/// 买错不得将错就错，但退款必须是**零套利**的：
+/// • 金额只由定价函数取上一档（买与退用同一把尺），买→退→买拿不到差价；
+/// • 只限布阵期（打过一仗再退就是白嫖一档）；
+/// • 在哪儿买的只能在哪儿退（跨模式退不了别人账上的钱）；
+/// • 本局已按该档放下去的兵不会被退档拉回来，所以那种情形直接拒退。
+@MainActor
+func smokeRefundPurchases() {
+    section("11. 军费反悔：退兵档/退魔法档/退充能（只限布阵期，退实付）")
+
+    UserDefaults.standard.removeObject(forKey: GameStore.CampaignProgress.userDefaultsKey)
+    for mode in GameSettings.Mode.allCases {
+        UserDefaults.standard.removeObject(forKey: Wallet.key(for: mode))
+    }
+
+    var w = Wallet()
+    w.gold = 1_000
+    let vs = GameStore(settings: makeSettings(mode: .vsAI, difficulty: "easy"), wallet: w)
+    expect(vs.canRefundPermanent, "布阵期退款窗口开着（当前 \(vs.phase)）")
+
+    // —— 原价对称：买一笔退一笔，连环五个来回账面应一个铜板不动 ——
+    let t0Gold = vs.wallet.gold
+    let costT0 = WarConfig.upgradeCost(typeKey: "infantry", currentLevel: 0)
+    vs.purchaseUpgrade("infantry", track: .attack)
+    pump(0.02)
+    expect(vs.activeUpgrades(for: "infantry").atk == 1 && vs.wallet.gold == t0Gold - costT0,
+           "升一档收 upgradeCost(T0)（-\(costT0)）")
+    vs.sellUpgrade("infantry", track: .attack)
+    pump(0.02)
+    expect(vs.activeUpgrades(for: "infantry").atk == 0 && vs.wallet.gold == t0Gold,
+           "退一档原价回来（余额回到 \(vs.wallet.gold)）")
+    var loop = t0Gold
+    for _ in 0..<5 {
+        vs.purchaseUpgrade("infantry", track: .health)
+        vs.sellUpgrade("infantry", track: .health)
+        loop = vs.wallet.gold
+    }
+    pump(0.02)
+    expect(loop == t0Gold && vs.wallet.spentThisBattle == 0 && vs.activeUpgrades(for: "infantry").hp == 0,
+           "连环五次买退套不出钱（余额 \(loop)、本局已花 \(vs.wallet.spentThisBattle)）")
+
+    // —— 白嫖守卫：场上还站着按这一档放下的兵时不退 ——
+    vs.purchaseUpgrade("infantry", track: .attack)
+    pump(0.02)
+    let spot = GridPoint(x: 1, y: 4)
+    vs.placingType = "infantry"
+    vs.handleTap(spot)
+    pump(0.02)
+    let priceBeforeGuard = vs.wallet.gold
+    vs.sellUpgrade("infantry", track: .attack)
+    pump(0.02)
+    expect(vs.activeUpgrades(for: "infantry").atk == 1 && vs.wallet.gold == priceBeforeGuard
+           && vs.hint?.contains("先撤销") == true,
+           "已按 T1 放下步兵时拒退（提示：\(vs.hint ?? "无")）")
+    vs.undoPlacement(at: spot)              // 先把那个子点掉（兵价另退）
+    pump(0.02)
+    let beforeSell = vs.wallet.gold
+    vs.sellUpgrade("infantry", track: .attack)
+    pump(0.02)
+    expect(vs.activeUpgrades(for: "infantry").atk == 0 && vs.wallet.gold == beforeSell + costT0,
+           "撤子之后退档才放行（+\(costT0)）")
+
+    // —— 魔法：退发与退档都当场从首领携带表上减回去；买断不退 ——
+    // 首领得先把它放下去（携带表只写场上那个子），否则“当场带上”根本无从验证
+    vs.placeUnit(type: WarConfig.chiefTypeKey, at: GridPoint(x: 0, y: 3))
+    pump(0.02)
+    vs.purchaseSpellUnlock("fireball")
+    pump(0.02)
+    let unlockGold = vs.wallet.gold
+    vs.purchaseSpellLevel("fireball")
+    vs.purchaseCharge("fireball")
+    pump(0.02)
+    let paidLevel = Wallet.spellLevelCost("fireball", currentLevel: 0)
+    let paidCharge = WarConfig.spells["fireball"]!.chargeCost
+    var chief = vs.frame.units.first { $0.isChief && $0.camp == 0 }
+    expect(chief?.spellLevels["fireball"] == 1 && chief?.spellCharges["fireball"] == 1,
+           "买完首领当场带上 1 档 1 发")
+    vs.sellCharge("fireball")
+    pump(0.02)
+    chief = vs.frame.units.first { $0.isChief && $0.camp == 0 }
+    expect(chief?.spellCharges["fireball"] == nil && vs.wallet.gold == unlockGold - paidLevel,
+           "退发把首领身上的发数当场减回去（+\(paidCharge)，余额 \(vs.wallet.gold)）")
+    vs.sellSpellLevel("fireball")
+    pump(0.02)
+    chief = vs.frame.units.first { $0.isChief && $0.camp == 0 }
+    expect(vs.wallet.spellLevel("fireball") == 0 && chief?.spellLevels["fireball"] == nil
+           && vs.wallet.gold == unlockGold,
+           "退档回到基础档且首领不再带高档（余额回至 \(unlockGold)）")
+    let afterLevelSell = vs.wallet.gold
+    vs.sellSpellLevel("fireball")
+    pump(0.02)
+    expect(vs.wallet.gold == afterLevelSell && vs.hint?.contains("基础档") == true,
+           "T0 无档可退，买断不退（提示：\(vs.hint ?? "无")）")
+
+    // —— 开战即关窗口：钱与账都不再动 ——
+    vs.placingType = "infantry"
+    vs.handleTap(GridPoint(x: 1, y: 5))
+    vs.purchaseUpgrade("cavalry", track: .attack)
+    pump(0.02)
+    let lockedGold = vs.wallet.gold
+    let lockedLevel = vs.activeUpgrades(for: "cavalry").atk
+    vs.finishPlacement()
+    pump(0.05)
+    expect(vs.phase == .battle, "完成布阵进入战斗期")
+    vs.sellUpgrade("cavalry", track: .attack)
+    vs.sellSpellLevel("fireball")
+    vs.sellCharge("fireball")
+    pump(0.02)
+    expect(vs.wallet.gold == lockedGold && vs.activeUpgrades(for: "cavalry").atk == lockedLevel
+           && vs.hint?.contains("布阵期") == true,
+           "开战后一律拒退（余额仍 \(vs.wallet.gold)，提示：\(vs.hint ?? "无")）")
+
+    // —— 跨模式不串账：vsAI 买到的永久档，闯关里既看不到也退不了 ——
+    var cw = Wallet()
+    cw.gold = 800
+    let camp = GameStore(settings: makeSettings(mode: .campaign), wallet: cw)
+    let campGold = camp.wallet.gold
+    expect(camp.activeUpgrades(for: "infantry").atk == 0,
+           "闯关拿自己的升级账（不沿用对战那边买到的档）")
+    camp.sellUpgrade("infantry", track: .attack)
+    pump(0.02)
+    expect(camp.wallet.gold == campGold && camp.wallet.unitUpgrades["infantry"] == nil,
+           "闯关退不到对战那边买过的档（钱一分没多）")
+    let vsBack = GameStore(settings: makeSettings(mode: .vsAI, difficulty: "easy"))
+    expect((vsBack.wallet.unitUpgrades["infantry"]?.atk ?? 0) == 0 && vsBack.wallet.gold == vs.wallet.gold,
+           "对战永久账没被闯关那边改到（余额仍 \(vsBack.wallet.gold)，步兵攻线已退至 T0）")
+
+    // —— 闯关败局：买档与买升档的钱连同入关快照一起回来 ——
+    UserDefaults.standard.removeObject(forKey: Wallet.key(for: .campaign))
+    var lw = Wallet()
+    lw.gold = 600
+    let fail = GameStore(settings: makeSettings(mode: .campaign), wallet: lw)
+    fail.purchaseUpgrade("archer", track: .attack)
+    fail.purchaseSpellUnlock("heal")
+    fail.purchaseSpellLevel("heal")
+    fail.purchaseCharge("heal")
+    pump(0.02)
+    let entry = fail.campaign.entrySnapshot?.gold ?? -1
+    let spentGold = fail.wallet.gold
+    expect(spentGold < entry && !fail.campaign.unitUpgrades.isEmpty
+           && fail.wallet.spellLevel("heal") == 1 && fail.wallet.charges["heal"] == 1,
+           "本关确实花了钱也买到了东西（\(entry) → \(spentGold)）")
+    fail.placeUnit(type: "infantry", at: GridPoint(x: 1, y: 4))
+    fail.finishPlacement()
+    pump(0.05)
+    fail.surrender()
+    pump(0.02)
+    expect(fail.wallet.gold == entry && fail.campaign.unitUpgrades.isEmpty
+           && fail.wallet.spellLevel("heal") == 0 && fail.wallet.charges.isEmpty,
+           "败局回滚：军费、升级账、魔法档与充能一起回到入关那一份（余额 \(fail.wallet.gold)）")
+    expect(GameStore.CampaignProgress.load().entryUpgrades?.isEmpty == true,
+           "回滚后的快照仍是干净的入关账（重试本关不会把已退的钱拿回来）")
 }
 
 // MARK: - 入口
@@ -742,7 +1211,7 @@ func smokeWalletEconomy() {
 func runAll() {
     print("战棋 App 逻辑层无头冒烟 · 棋盘 \(WarConfig.boardSizes[1].width)×\(WarConfig.boardSizes[1].height)"
           + " · 默认编成 \(WarConfig.defaultRoster.count) 兵 + 1 首领 ×2")
-    // WAR_SMOKE_ONLY=manual|auto|intel|chief|wallet 可单选一段快跑（排障用）
+    // WAR_SMOKE_ONLY=manual|auto|intel|chief|wallet|campaign|growth|refund 可单选一段快跑（排障用）
     // chief 段的旧名 wipe（当年只验“歼灭即结束”）保留成同义词，以免旧命令行静默跑空
     let only = ProcessInfo.processInfo.environment["WAR_SMOKE_ONLY"]
     if only == nil || only == "manual" { smokePlacementAndManualCommand() }
@@ -750,6 +1219,9 @@ func runAll() {
     if only == nil || only == "intel" { smokeIntelPanel() }
     if only == nil || only == "chief" || only == "wipe" { smokeChiefEndgame() }
     if only == nil || only == "wallet" { smokeWalletEconomy() }
+    if only == nil || only == "campaign" || only == "surrender" { smokeSurrenderAndCampaign() }
+    if only == nil || only == "growth" { smokeGrowthAndPromotion() }
+    if only == nil || only == "refund" { smokeRefundPurchases() }
 }
 
 // CLI 的主线程本就是 main executor，只是顶层代码不被编译器认定为 MainActor，
@@ -758,6 +1230,9 @@ MainActor.assumeIsolated {
     // 本机上一台真机（或上一次真跑）留下的余额会把“起始 120 + 补贴 30”这类
     // 基线断言带歪，所以从干净账面开始；冒烟内的 store 全部另注新钱包。
     UserDefaults.standard.removeObject(forKey: Wallet.userDefaultsKey)
+    for mode in GameSettings.Mode.allCases {
+        UserDefaults.standard.removeObject(forKey: Wallet.key(for: mode))
+    }
     runAll()
 }
 

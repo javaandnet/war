@@ -16,10 +16,23 @@ struct SettingsView: View {
                     Picker("模式", selection: $draft.mode) {
                         ForEach(GameSettings.Mode.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
+                    Text("四个模式各记一本军费：金币、魔法买断与档位、兵档升级均互不通用（切模式就是换一本账，不会把别处刷出来的钱带进来）。闯关的升级账另记一份，与永久账无关。")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                     Picker("AI 难度", selection: $draft.difficultyKey) {
                         ForEach(WarConfig.difficultyOrder, id: \.self) { key in
                             Text(label(for: key)).tag(key)
                         }
+                    }
+                    .disabled(draft.mode == .campaign)
+                    if draft.mode == .campaign {
+                        Text("闯关模式的难度、地图与 seed 均由关卡公式按关数固定导出（不读玩家战绩，也不会动态匹配）；以下难度/seed 项对闯关不生效。")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        // 进度是“胜利当场”就落盘的（不是点「下一关」时才 +1），所以这里报的就是存档里的实况
+                        Text("闯关进度：已通过第 \(max(0, store.campaign.currentLevel - 1)) 关，接下来第 \(store.campaign.currentLevel) 关（最高到过第 \(store.campaign.maxLevelReached) 关）")
+                            .font(.caption)
+                            .foregroundStyle(Theme.accent)
                     }
                 }
 
@@ -40,12 +53,15 @@ struct SettingsView: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     stepper("地形 seed（决定地图）", value: $draft.terrainSeed, step: 1)
+                        .disabled(draft.mode == .campaign)
                     stepper("AI seed（决定采样）", value: $draft.aiSeed, step: 1)
+                        .disabled(draft.mode == .campaign)
                     Button("两个 seed 都随机") {
                         draft.terrainSeed = Int.random(in: 1...9_999)
                         draft.aiSeed = Int.random(in: 1...9_999_999)
                     }
                     .font(.caption)
+                    .disabled(draft.mode == .campaign)
                 }
 
                 Section("动画与功耗") {

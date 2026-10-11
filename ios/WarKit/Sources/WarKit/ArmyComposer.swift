@@ -1,17 +1,17 @@
 import Foundation
 
-/// 一支部队的编成结果：士兵清单（含档位）+ 首领携带的魔法发数。
+/// 一支部队的编成结果：士兵清单（含三线升级等级）+ 首领携带的魔法发数。
 ///
 /// 值类型、可 Equatable —— 配兵必须是纯函数，同样的预算要给出同样的兵，
 /// 否则"同 seed 两局逐帧一致"这条复现不变式会被编成环节先打穿。
 public struct ArmyPlan: Equatable, Sendable {
     public struct Soldier: Equatable, Sendable {
         public let typeKey: String
-        public let tier: Int
+        public let upgrades: WarConfig.Upgrades
 
-        public init(typeKey: String, tier: Int) {
+        public init(typeKey: String, upgrades: WarConfig.Upgrades = WarConfig.Upgrades()) {
             self.typeKey = typeKey
-            self.tier = tier
+            self.upgrades = upgrades
         }
     }
 
@@ -19,12 +19,17 @@ public struct ArmyPlan: Equatable, Sendable {
     /// 首领本局携带的每种魔法发数。字典不参与输出顺序：读侧一律按
     /// `WarConfig.spellOrder` 遍历，所以这里用字典不会引入不确定性。
     public let spellCharges: [String: Int]
+    /// 首领本局的每种魔法**等级**（AI 侧取自难度档 / 关卡公式，与玩家“军费买档”同一条轴）。
+    /// 不放进 `Soldier`：魔法只属于首领，而首领不占兵位。
+    public let spellLevels: [String: Int]
     public let spent: Int
     public let leftover: Int
 
-    public init(soldiers: [Soldier], spellCharges: [String: Int], spent: Int, leftover: Int) {
+    public init(soldiers: [Soldier], spellCharges: [String: Int], spellLevels: [String: Int] = [:],
+                spent: Int, leftover: Int) {
         self.soldiers = soldiers
         self.spellCharges = spellCharges
+        self.spellLevels = spellLevels
         self.spent = spent
         self.leftover = leftover
     }
@@ -48,10 +53,10 @@ public enum ArmyComposer {
     /// "更少但仍是前排优先"的兵，而不是随机缺一两列。
     public static let defaultTemplate = WarConfig.defaultRoster
 
-    /// 基线编成：默认 6 兵全 tier1 + 首领无充能（不花一分钱）。
+    /// 基线编成：默认 6 兵全未升级 + 首领无充能（不花一分钱）。
     /// 内核回归、冒烟指纹与“玩家还没买过东西”的开局都等价于这一份。
     public static let baselinePlan = ArmyPlan(
-        soldiers: WarConfig.defaultRoster.map { ArmyPlan.Soldier(typeKey: $0, tier: 1) },
+        soldiers: WarConfig.defaultRoster.map { ArmyPlan.Soldier(typeKey: $0) },
         spellCharges: [:], spent: 0, leftover: 0)
 
     /// 按难度键取预算并配兵。难度键缺省/未知时返回 nil ——
@@ -59,7 +64,22 @@ public enum ArmyComposer {
     /// 免得"忘了传难度"静默变成"一支买不起兵的空军队"。
     public static func compose(difficultyKey: String?) -> ArmyPlan? {
         guard let key = difficultyKey, let diff = WarConfig.difficulties[key] else { return nil }
-        return compose(budget: diff.budget, template: defaultTemplate)
+        let plan = compose(budget: diff.budget, template: defaultTemplate)
+        // 魔法档位跟着难度档走（不花预算：它是“这一档就该会几层”，而不是“它买得起”）。
+        // 只对真的携带了发数的那种魔法记档，否则会出现“会 3 档冰球但一发没带”的空转。
+        return ArmyPlan(soldiers: plan.soldiers, spellCharges: plan.spellCharges,
+                        spellLevels: spellLevels(diff.spellLevel, carried: plan.spellCharges),
+                        spent: plan.spent, leftover: plan.leftover)
+    }
+
+    /// 把“一个统一档位”展开成携带表（按 `spellOrder` 定序写入，字典因此仍可复现）。
+    static func spellLevels(_ level: Int, carried: [String: Int]) -> [String: Int] {
+        guard level > 0 else { return [:] }
+        var map: [String: Int] = [:]
+        for key in WarConfig.spellOrder where (carried[key] ?? 0) > 0 {
+            map[key] = min(level, WarConfig.maxSpellLevel)
+        }
+        return map
     }
 
     public static func compose(budget: Int, template: [String] = defaultTemplate) -> ArmyPlan {
@@ -71,35 +91,35 @@ public enum ArmyComposer {
         for typeKey in template where soldiers.count < WarConfig.soldiersPerSide {
             guard let stat = WarConfig.unitTypes[typeKey], !stat.isChief,
                   stat.cost <= remaining else { continue }
-            soldiers.append(ArmyPlan.Soldier(typeKey: typeKey, tier: 1))
+            soldiers.append(ArmyPlan.Soldier(typeKey: typeKey))
             remaining -= stat.cost
         }
 
-        // 2) 升档：升的是**兵种**（该型兵一起升），与玩家侧钱包的永久升级同价同义。
-        //    选"每块钱换来的战略价值"最高的一型，同分由 unitTypeOrder 定序。
+        // 2) 升级：三线（攻/防/生命）各自独立、无上限。value 恒定不提供收益信号，
+        //    所以这里纯按价低者先扫开：每次买全场“下一档最便宜”的那条线，
+        //    同价按 unitTypeOrder → UpgradeTrack 定序（均与字典无关，保证可复现）。
+        //    升的是**兵种**（该型兵一起升），与玩家侧钱包的升级同价同义。
+        //    无上限会把整笔余款吃干、饿死后面的充能阶段 —— 故保留“一发最便宜充能”的额度给首领带魔法。
+        let chargeReserve = WarConfig.spells.values.map { $0.chargeCost }.min() ?? 0
         while !soldiers.isEmpty {
-            var pick: (typeKey: String, from: Int, cost: Int, ratio: Double)?
+            var pick: (typeKey: String, track: WarConfig.UpgradeTrack, cost: Int)?
             for typeKey in WarConfig.unitTypeOrder {
-                guard let current = soldiers.first(where: { $0.typeKey == typeKey })?.tier,
-                      current < WarConfig.maxTier else { continue }
-                let next = current + 1
-                let cost = WarConfig.tierCosts[next - 1]
-                guard cost <= remaining,
-                      let low = WarConfig.unitStat(typeKey, tier: current),
-                      let high = WarConfig.unitStat(typeKey, tier: next) else { continue }
-                let gain = Double(soldiers.filter { $0.typeKey == typeKey }.count)
-                    * (high.value - low.value)
-                let ratio = gain / Double(cost)
-                if pick == nil || ratio > pick!.ratio {
-                    pick = (typeKey, current, cost, ratio)
+                guard let current = soldiers.first(where: { $0.typeKey == typeKey })?.upgrades else { continue }
+                for track in WarConfig.UpgradeTrack.allCases {
+                    let cost = WarConfig.upgradeCost(typeKey: typeKey, currentLevel: current.level(track))
+                    guard cost <= remaining - chargeReserve else { continue }
+                    if pick == nil || cost < pick!.cost {
+                        pick = (typeKey, track, cost)
+                    }
                 }
             }
             guard let upgrade = pick else { break }
             remaining -= upgrade.cost
             soldiers = soldiers.map {
-                $0.typeKey == upgrade.typeKey
-                    ? ArmyPlan.Soldier(typeKey: $0.typeKey, tier: upgrade.from + 1)
-                    : $0
+                guard $0.typeKey == upgrade.typeKey else { return $0 }
+                var u = $0.upgrades
+                u.bump(upgrade.track)
+                return ArmyPlan.Soldier(typeKey: $0.typeKey, upgrades: u)
             }
         }
 
@@ -123,5 +143,18 @@ public enum ArmyComposer {
 
         return ArmyPlan(soldiers: soldiers, spellCharges: charges,
                         spent: wallet - remaining, leftover: remaining)
+    }
+
+    /// 闯关敌军编成：默认名册各兵均带上关卡公式的 `enemyUpgrades`（三线独立成长），
+    ///  Spell 充能取自该关难度档的基线预算配兵。**不读玩家钱包**，于是同一关永远同一支军。
+    public static func campaignEnemyPlan(level: Int) -> ArmyPlan {
+        let spec = WarConfig.campaignLevel(level)
+        let soldiers = WarConfig.defaultRoster.map {
+            ArmyPlan.Soldier(typeKey: $0, upgrades: spec.enemyUpgrades)
+        }
+        let charges = compose(difficultyKey: spec.difficultyKey)?.spellCharges ?? [:]
+        return ArmyPlan(soldiers: soldiers, spellCharges: charges,
+                        spellLevels: spellLevels(spec.spellLevel, carried: charges),
+                        spent: 0, leftover: 0)
     }
 }

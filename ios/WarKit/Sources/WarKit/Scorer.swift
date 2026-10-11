@@ -33,8 +33,25 @@ public enum Scorer {
         case "chiefBounty": return W.chiefBounty
         case "heal": return W.heal
         case "freeze": return W.freeze
+        case "suicide": return W.suicide
+        case "chiefPeril": return W.chiefPeril
         default: return 0
         }
+    }
+
+    /// 反击必杀自己且又打不死目标：纯粹的“送死”。
+    /// 之所以既进评分又在 `Enumerator` 里硬过滤：扣分只影响排序，而低难度档的
+    /// softmax 本来就要往次优候选洒随机 —— 没有硬门槛时这种着法仍会被采样出来。
+    public static func isSuicidalAttack(_ ctx: AiContext, _ candidate: Candidate) -> Bool {
+        guard candidate.kind == .attack || candidate.kind == .moveAttack,
+              let tid = candidate.targetId, let target = ctx.bf.findUnitById(tid) else { return false }
+        let bf = ctx.bf
+        let unit = candidate.unit
+        let dmg = unit.damageTo(target, targetTerrainDefBonus: bf.getTerrainDefBonus(target.position))
+        guard dmg < target.hp else { return false }        // 我先击杀它：就没有反击
+        guard target.canCounterAttackerAt(candidate.action) else { return false }
+        let cdmg = target.damageTo(unit, targetTerrainDefBonus: bf.getTerrainDefBonus(candidate.action))
+        return cdmg >= unit.hp
     }
 
     public static func score(_ ctx: AiContext, _ input: Candidate) -> Candidate {
@@ -53,6 +70,21 @@ public enum Scorer {
         func valuePart(_ target: WarUnit) -> Double {
             min(1.0, target.value / S.valueRef)
                 * (1.0 - Double(target.hp) / Double(max(1, target.maxHp)) * 0.6)
+        }
+
+        /// 本候选是否就地终结比赛（普攻或魔法斩杀敌方首领）。
+        /// 终结了就没有“下回合会被打死”可言 —— `chiefPeril` 必须为它让路。
+        func endsMatchHere(_ c: Candidate) -> Bool {
+            guard attackKind || spellKind, let tid = c.targetId,
+                  let target = bf.findUnitById(tid), target.isChief else { return false }
+            if attackKind {
+                return unit.damageTo(target, targetTerrainDefBonus: bf.getTerrainDefBonus(target.position))
+                    >= target.hp
+            }
+            guard let base = WarConfig.spells[c.spellKey ?? ""] else { return false }
+            // 只按中心伤害判：溅射只会让它更容易死，不会把“够不够”判成反向
+            let power = WarConfig.spellStat(base.key, level: unit.spellLevels[base.key] ?? 0)?.power ?? base.power
+            return power >= target.hp
         }
 
         // ── 收益 / 浪费 ──
@@ -85,18 +117,25 @@ public enum Scorer {
                 parts["rangePenalty"] = d <= 1 ? 0.5 : 0
             }
 
-            // 反击风险：目标还手能扣我多少血（按我将站立的落点地形与落点距离算）
+            // 反击风险：目标还手能扣我多少血（按我将站立的落点地形与落点距离算）。
+            // 幅度严格钳在 [0,1]：“这一手会不会直接把我打死”不由本项表达，
+            // 而是下面那记 `suicide`（旧写法在这里 risk += 1.0 越了铁律 1 的界，
+            // 而 -26 的权重根本拉不动 damage+kill 量级的收益 —— 那就是 AI 送死的原因）。
             if target.canCounterAttackerAt(candidate.action) {
                 let cdmg = target.damageTo(unit, targetTerrainDefBonus: bf.getTerrainDefBonus(candidate.action))
-                var risk = min(1.0, Double(cdmg) / Double(max(1, S.damageRef))) * (0.4 + selfHpRatio)
-                if cdmg >= unit.hp { risk += 1.0 }   // 自杀式攻击重罚
-                parts["counter"] = risk
+                parts["counter"] = min(1.0, Double(cdmg) / Double(max(1, S.damageRef)) * (0.4 + selfHpRatio))
+            }
+            // 必死又换不掉击杀：除了上面那记风险再叠一层压倒量（与枚举层硬过滤同一口径）
+            if Self.isSuicidalAttack(ctx, candidate) {
+                parts["suicide"] = 1.0
             }
         } else if spellKind, let tid = candidate.targetId, let target = bf.findUnitById(tid),
-                  let stat = WarConfig.spells[candidate.spellKey ?? ""] {
+                  let base = WarConfig.spells[candidate.spellKey ?? ""] {
             // 施法评分。伤害/斩杀/目标价值复用普攻那套尺子（否则 AI 会在两套口径间
             // 摇摆）；但魔法**不触发反击**，因此不写 counter 项 —— 这是魔法的真实优势，
             // 不是额外奖励。heal/freeze 权重均刻意低于 kill，不会抢掉到手的击杀。
+            // 威力/溅射取首领**升档后**的那一份（与 `castSpell` 同一个函数，不另算）。
+            let stat = WarConfig.spellStat(base.key, level: unit.spellLevels[base.key] ?? 0) ?? base
             switch stat.effect {
             case .damage:
                 var splashHits = 0
@@ -149,6 +188,18 @@ public enum Scorer {
         if ctx.threat.count == bf.width * bf.height {
             let t = bf.threatAt(ctx.threat, candidate.action.x, candidate.action.y)
             parts["exposure"] = min(1.0, t / S.threatSaturation)
+            // 首领一死就地判负：代价不是“少一个兵”而是“输掉本局”，所以单独一项，
+            // 且只在落点真会被打死（来袭威胁 ≥ 承伤能力）时计。
+            // 士兵不共享这一项：曾把它做成通用的“落点死亡风险”（比值越线才计），
+            // 实测结果是双方互相绕行 —— 权重给到 -35 就有 25/40 局打到
+            // 40 回合上限仍分不出胜负（同一现象在 exposure 上早记过：到 -62 即僵持）。
+            // “会死”与“会掉血”的量级差因此只由 `suicide`（出手即死）与本项（首领）承担。
+            let absorb = max(1.0, Double(unit.hp + unit.def + bf.getTerrainDefBonus(candidate.action)))
+            // 例外：本候选就地斩杀敌方首领 = 本局立刻结束，“下回合会被打死”就不成立。
+            // 不豁免就会拿 -240 去压碎唯一的赢招（首领隔着一堆残兵也能一换一取胜）。
+            if unit.isChief, t / absorb >= 1.0, !endsMatchHere(candidate) {
+                parts["chiefPeril"] = 1.0
+            }
         } else {
             parts["exposure"] = 0
         }

@@ -14,6 +14,7 @@ import WarKit
 struct ContentView: View {
     @EnvironmentObject private var store: GameStore
     @State private var showSettings = false
+    @State private var confirmSurrender = false
     @State private var tab: PanelTab = .action
     @State private var showDrawer = false
 
@@ -74,6 +75,14 @@ struct ContentView: View {
         .toolbar { toolbarItems }
         .overlay { gameOverCard }
         .sheet(isPresented: $showSettings) { SettingsView().environmentObject(store) }
+        .confirmationDialog("确认投降？", isPresented: $confirmSurrender, titleVisibility: .visible) {
+            Button("投降", role: .destructive) { store.surrender() }
+            Button("再打打", role: .cancel) {}
+        } message: {
+            Text(store.settings.mode == .campaign
+                 ? "本局按败局结算，闯关会回滚军费与升级账"
+                 : "本局按败局结算，结局不可撤销")
+        }
         .animation(.snappy, value: showDrawer)
         .animation(.snappy, value: focused)
         .animation(.snappy, value: isOver)
@@ -101,10 +110,31 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 settlementLine
+                if store.settings.mode == .campaign {
+                    // 闯关：一句关卡状态，取代“重开同 seed / 新开局”（语义已不适用）。
+                    // 进度在胜利那一刻已经落盘，所以这里报的是“刚打完那一关 + 接下来要打的那一关”。
+                    let played = store.lastCampaignLevel ?? store.campaign.currentLevel
+                    Text(winner == 0
+                         ? "第 \(played) 关通关！奖金已入账，进度已保存（下一关：第 \(store.campaign.currentLevel) 关）"
+                         : "第 \(played) 关未通过 · 军费已回滚，可重试（最高到过第 \(store.campaign.maxLevelReached) 关）")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
                 HStack(spacing: 10) {
-                    Button("重开（同图同 seed）") { store.restartSameSeed() }
-                    Button("新开局") { store.newGame() }
-                        .buttonStyle(.borderedProminent)
+                    if store.settings.mode == .campaign {
+                        Button("退出闯关") { store.exitCampaign() }
+                        if winner == 0 {
+                            Button("下一关") { store.nextCampaignLevel() }
+                                .buttonStyle(.borderedProminent)
+                        } else {
+                            Button("重试本关") { store.retryCampaignLevel() }
+                                .buttonStyle(.borderedProminent)
+                        }
+                    } else {
+                        Button("重开（同图同 seed）") { store.restartSameSeed() }
+                        Button("新开局") { store.newGame() }
+                            .buttonStyle(.borderedProminent)
+                    }
                 }
                 .font(.caption)
             }
@@ -233,6 +263,14 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(store.statusLine).font(.subheadline.weight(.semibold))
+                if store.settings.mode == .campaign {
+                    // currentLevel 始终指向尚未通过的那一关（胜利当场已 +1），所以“本关”就是它
+                    Text("第\(store.campaign.currentLevel)关·"
+                         + "\(WarConfig.difficulties[store.campaignSpec.difficultyKey]?.name ?? "")"
+                         + "·最高\(store.campaign.maxLevelReached)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                }
                 if store.walletUsable {
                     // 军费读数常驻状态条：不管面板开没开，玩家总得知道还剩多少
                     Label("\(store.wallet.gold)", systemImage: "dollarsign.circle.fill")
@@ -266,9 +304,18 @@ struct ContentView: View {
     private var toolbarItems: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
             Menu {
-                Button("一键布阵开战") { store.quickDeploy() }
-                Button("重开（同图同 seed）") { store.restartSameSeed() }
-                Button("新开局（回到布阵）") { store.newGame() }
+                if store.settings.mode == .campaign {
+                    // 闯关下“同 seed 重开/新开局”语义不适用（关卡参数由公式钉死），换成“重试本关”
+                    Button("重试本关") { store.retryCampaignLevel() }
+                } else {
+                    Button("一键布阵开战") { store.quickDeploy() }
+                    Button("重开（同图同 seed）") { store.restartSameSeed() }
+                    Button("新开局（回到布阵）") { store.newGame() }
+                }
+                if store.phase == .battle {
+                    Divider()
+                    Button("投降", role: .destructive) { confirmSurrender = true }
+                }
             } label: {
                 Image(systemName: "arrow.clockwise.circle")
             }

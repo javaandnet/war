@@ -401,8 +401,10 @@ public final class Battlefield {
         }
 
         attacker.remainingAttacks -= 1
-        // 一回合一个动作：动手了就把施法次数一并关掉（与 castSpell 互斥）
+        // 一回合一个动作：动手了就把施法次数与机动力一并关掉（出手即结束本回合行动，
+        // 所以「先走位后攻击」是唯一顺序，反过来攻击完不能再挪）。
         attacker.remainingSpell = 0
+        attacker.remainingMove = 0
         let dmg = attacker.damageTo(target, targetTerrainDefBonus: getTerrainDefBonus(target.position))
         result.damage = target.takeDamage(dmg)
         result.targetKilled = target.isDead
@@ -417,8 +419,64 @@ public final class Battlefield {
             if result.counterKilled { unitGrid[attacker.y][attacker.x] = nil }
         }
 
+        // 经验结算（成长的唯一写入点之一）。公式全在本文件里都是**纯函数 + 实际生效量**：
+        // 用的是 `takeDamage` 返回的"真扣了多少"，不是"本来该打多少"，
+        // 于是一刀秒残兵不会按满伤害长经验，重放也必然与推演逐字段相等。
+        if result.damage > 0 {
+            attacker.addExp(WarConfig.Growth.hitExp(result.damage))
+        }
+        if result.targetKilled {
+            attacker.addExp(WarConfig.Growth.killExp(value: target.value))
+        } else if result.damage > 0 {
+            target.addExp(WarConfig.Growth.sufferedExp(result.damage))
+        }
+        if result.counterDamage > 0 {
+            target.addExp(WarConfig.Growth.hitExp(result.counterDamage))
+            if !attacker.isDead {
+                attacker.addExp(WarConfig.Growth.sufferedExp(result.counterDamage))
+            }
+        }
+
         version += 1
         return result
+    }
+
+    // MARK: - 成长结算（属性点与转职的唯一写入点）
+
+    /// 给单位分配 1 点属性点。规则：有待分点数、且当前形态还没到等级上限。
+    ///
+    /// "满 10 级就不再能加点"是刻意的门槛（`level < levelCap`）：未转职的上限就是 10，
+    /// 到顶之后手里那点必须先把兵种转了才花得出去 —— 否则成长会停在半空，
+    /// 玩家也看不到"转职"这个选择的分量。UI 不得自己改 `attrAlloc`，一切走这里。
+    @discardableResult
+    public func allocate(_ unit: WarUnit, track: WarConfig.UpgradeTrack) -> Bool {
+        guard !unit.isDead, unit.attrBank > 0, unit.level < unit.levelCap else { return false }
+        guard unit.spendPoint(on: track) else { return false }
+        version += 1
+        return true
+    }
+
+    /// 转职：把单位的当前兵种换成一个分支，**不可逆、不收费**（它是等级到点的奖励，
+    /// 不是又一次军费消费）。校验都在内核：满 10 级、尚未转职、分支确实属于该兵种，
+    /// 并且**分支的首领属性必须与原兵种一致** —— 否则一个步兵能转成"王者"，
+    /// 斩首与施法资格就被绕开了。
+    ///
+    /// 转职同时发 1 点属性点，并把等级上限从 10 抬到 20。
+    @discardableResult
+    public func promote(_ unit: WarUnit, to branchKey: String) -> Bool {
+        guard !unit.isDead, !unit.isPromoted,
+              unit.level >= WarConfig.Growth.promoteLevel,
+              WarConfig.promotions[unit.type]?.contains(branchKey) == true,
+              let branch = WarConfig.unitTypes[branchKey], branch.promotable,
+              branch.isChief == unit.isChief else { return false }
+        let oldMove = unit.moveRange
+        unit.typeKey = branchKey              // didSet 里重算数值：涨的上限补进当前血量
+        // 机动上限变了：把差额补给"还没用掉的"点数（已经走完的人不会被白送一段位移）
+        unit.remainingMove = min(max(0, unit.remainingMove + (unit.moveRange - oldMove)), unit.moveRange)
+        unit.attrBank += 1
+        if unit.autoGrows { _ = unit.spendAutoPoint() }   // AI / 观战不留点数
+        version += 1
+        return true
     }
 
     // MARK: - 施法结算（魔法的唯一写入点，且只有首领能调）
@@ -434,7 +492,10 @@ public final class Battlefield {
     @discardableResult
     public func castSpell(_ caster: WarUnit, spell spellKey: String, at target: GridPoint) -> SpellResult {
         var r = SpellResult(spellKey: spellKey)
-        guard let stat = WarConfig.spells[spellKey] else { r.message = "未知魔法"; return r }
+        guard let base = WarConfig.spells[spellKey] else { r.message = "未知魔法"; return r }
+        // 射程/威力/溅射一律走“升档后的那一份”（没升过就等于基础表）。
+        // 不在这里取级就会分成两套口径：面板写“72”而棋盘上烧了“60”。
+        let stat = WarConfig.spellStat(spellKey, level: caster.spellLevels[spellKey] ?? 0) ?? base
         guard !caster.isDead, caster.isChief else { r.message = "只有首领能施法"; return r }
         guard caster.spellKeys.contains(spellKey) else { r.message = "首领未携带\(stat.name)"; return r }
         guard !caster.stunned else { r.message = "首领被冻住，无法施法"; return r }
@@ -461,6 +522,7 @@ public final class Battlefield {
         caster.spellCharges[spellKey] = caster.charges(for: spellKey) - 1
         caster.remainingSpell -= 1
         caster.remainingAttacks = 0     // 一回合一个动作：施法吃掉攻击配额
+        caster.remainingMove = 0        // 与普攻同口径：出手即结束本回合行动（走位必须在施法前）
 
         r.impact = target
         switch stat.effect {
@@ -472,15 +534,20 @@ public final class Battlefield {
                     applySpellDamage(v, stat.splash, caster: caster, to: &r)
                 }
             }
+            // 出手经验按**本次施法的总伤害**一次性结算（与普攻同一条尺子、同一个封顶），
+            // 击杀/挨打经验已在 `applySpellDamage` 里逐单位给过。
+            caster.addExp(WarConfig.Growth.hitExp(r.affected.values.reduce(0, +)))
             r.message = "\(stat.name)：中心 \(stat.power)" + (stat.splash > 0 ? "，溅射 \(stat.splash)" : "")
         case .heal:
             let healed = focus.heal(stat.power)
             r.affected[target] = healed
+            caster.addExp(WarConfig.Growth.healExp(healed))   // 按实际回复量：白治不长经验
             r.message = "\(stat.name) +\(healed)"
         case .stun:
             focus.stunned = true
             r.stunnedTarget = true
             r.affected[target] = 1
+            caster.addExp(WarConfig.Growth.freezeExp)
             r.message = "\(focus.name) 被冻结，本回合无法行动"
         }
         version += 1
@@ -494,8 +561,11 @@ public final class Battlefield {
         let applied = unit.takeDamage(amount)
         r.affected[unit.position] = (r.affected[unit.position] ?? 0) + applied
         if unit.isDead {
+            caster.addExp(WarConfig.Growth.killExp(value: unit.value))
             unitGrid[unit.y][unit.x] = nil
             r.killed.append(unit.position)
+        } else if applied > 0 {
+            unit.addExp(WarConfig.Growth.sufferedExp(applied))
         }
     }
 
@@ -685,29 +755,36 @@ public final class Battlefield {
     /// 默认布阵：双方各放一支军队，**首领必带、免费、不占兵位**。
     /// id 规则固定（阵营 0 从 100 起、阵营 1 从 200 起），便于测试与回放对齐。
     ///
-    /// `difficultyKey == nil` 走基线编成（6 兵 tier1、首领无充能）：
+    /// `difficultyKey == nil` 走基线编成（6 兵未升级、首领无充能）：
     /// 内核回归与冒烟指纹都钉在这条路径上，不传难度时一个数值都不该漂。
     /// 传难度键则该档军费交 `ArmyComposer` 配兵；`camp` 只编这一侧
     /// （vsAI 下玩家那侧由布阵/钱包负责，敌方那侧才按预算走）。
     @discardableResult
-    public func setDefaultLayout(difficultyKey: String? = nil, camp targetCamp: Int? = nil) -> Bool {
+    public func setDefaultLayout(difficultyKey: String? = nil, camp targetCamp: Int? = nil,
+                                 autoGrows: Bool = true) -> Bool {
         let plan = ArmyComposer.compose(difficultyKey: difficultyKey) ?? ArmyComposer.baselinePlan
         var allPlaced = true
         for camp in (targetCamp.map { [$0] } ?? [0, 1]) {
-            if !placeArmy(plan, camp: camp) { allPlaced = false }
+            if !placeArmy(plan, camp: camp, autoGrows: autoGrows) { allPlaced = false }
         }
         return allPlaced
     }
 
     /// 按编成落位一侧。落位顺序按数组下标逐个往后排，避免单位堆叠在同一格。
+    ///
+    /// `autoGrows`：这一侧是不是 AI 指挥（升级/转职瞬间自动把属性点分掉）。
+    /// `growth`：闯关带回的成长账（键 = 基础兵种 key）。缺省为空 = 人人 1 级；
+    /// AI 那一侧永远不传，于是敌军每关从零开始练 —— 同关两局的成长必然一致。
     @discardableResult
-    public func placeArmy(_ plan: ArmyPlan, camp: Int) -> Bool {
+    public func placeArmy(_ plan: ArmyPlan, camp: Int, autoGrows: Bool = true,
+                          growth: [String: WarConfig.Growth.UnitGrowth] = [:]) -> Bool {
         let baseId = camp == 0 ? 100 : 200
         var ok = true
         for (i, soldier) in plan.soldiers.enumerated() {
             guard let spot = findSpawnSpot(camp: camp, i) else { ok = false; continue }
             let unit = WarUnit(id: baseId + i, type: soldier.typeKey, camp: camp,
-                               x: spot.x, y: spot.y, tier: soldier.tier)
+                               x: spot.x, y: spot.y, upgrades: soldier.upgrades,
+                               autoGrows: autoGrows, growth: growth[soldier.typeKey])
             if unitGrid[spot.y][spot.x] == nil {
                 units.append(unit)
                 unitGrid[spot.y][spot.x] = unit
@@ -720,8 +797,9 @@ public final class Battlefield {
         guard let chiefSpot = findSpawnSpot(camp: camp, plan.soldiers.count) else { return false }
         guard unitGrid[chiefSpot.y][chiefSpot.x] == nil else { return false }
         let chief = WarUnit(id: baseId + plan.soldiers.count, type: WarConfig.chiefTypeKey,
-                            camp: camp, x: chiefSpot.x, y: chiefSpot.y)
-        chief.carrySpells(plan.spellCharges)   // 唯一入口：买到的发数在布阵时就钉死
+                            camp: camp, x: chiefSpot.x, y: chiefSpot.y,
+                            autoGrows: autoGrows, growth: growth[WarConfig.chiefTypeKey])
+        chief.carrySpells(plan.spellCharges, levels: plan.spellLevels)   // 唯一入口：发数与档位都在布阵时钉死
         units.append(chief)
         unitGrid[chiefSpot.y][chiefSpot.x] = chief
         version += 1

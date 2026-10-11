@@ -110,6 +110,9 @@ struct DecisionLogView: View {
             // 魔法名取内核配置表（UI 不另存一份名字，改了配置这里跟着变）
             let name = spellKey.flatMap { WarConfig.spells[$0]?.name } ?? "魔法"
             return targetId.map { "施放\(name) → #\($0)" } ?? "施放\(name)"
+        case .promote:
+            // 转职不进候选集（AI 在单位决策前就转完了），这里只为守住穷尽 switch
+            return "转职"
         }
     }
 }
