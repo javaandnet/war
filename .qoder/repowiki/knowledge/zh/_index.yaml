@@ -1,0 +1,37 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: Q0DeR-MaG1C-BrAnCh-Fo2-NoN-GiT-Or-No-C0MmIt
+nodes_managed: true
+exported_at: "2026-10-11T01:14:34Z"
+modules:
+    "":
+        dir_name: War 战棋游戏多端实现
+        title: War 战棋游戏多端实现
+        scope:
+            - war/
+        source_files: []
+        children:
+            - ios_app
+            - js_game
+        depends_on: []
+        related_to: []
+    ios_app:
+        dir_name: iOS 战棋游戏客户端与 AI 内核
+        title: iOS 战棋游戏客户端与 AI 内核
+        scope:
+            - war/ios/War/
+            - war/ios/WarKit/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    js_game:
+        dir_name: 回合制战棋 AI 原型（war）
+        title: 回合制战棋 AI 原型（war）
+        scope:
+            - war/war/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

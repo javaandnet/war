@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: js_game
+title: 回合制战棋 AI 原型（war）
+scope:
+    - war/war/
+source_files: []
+depends_on: []
+related_to: []

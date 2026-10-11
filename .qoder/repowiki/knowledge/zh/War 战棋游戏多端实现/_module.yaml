@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: ""
+title: War 战棋游戏多端实现
+scope:
+    - war/
+source_files: []
+depends_on: []
+related_to: []
